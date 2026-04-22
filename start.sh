@@ -21,14 +21,23 @@ echo -e "${BLUE}========================================${NC}"
 echo ""
 
 # 检查并关闭已运行的服务
-echo -e "${YELLOW}[1/5] 检查并关闭已运行的服务...${NC}"
+echo -e "${YELLOW}[1/6] 检查并关闭已运行的服务...${NC}"
 pkill -f "uvicorn app.main:app" 2>/dev/null || true
 pkill -f "photo-server" 2>/dev/null || true
 pkill -f "npm run dev" 2>/dev/null || true
 sleep 2
 
+# 启动 Milvus
+echo -e "${YELLOW}[2/6] 启动 Milvus...${NC}"
+if [ -f "$PROJECT_DIR/scripts/start-milvus.sh" ]; then
+    cd "$PROJECT_DIR"
+    ./scripts/start-milvus.sh
+else
+    echo -e "${YELLOW}⚠ Milvus 启动脚本不存在，跳过${NC}"
+fi
+
 # 启动 ML Service
-echo -e "${YELLOW}[2/5] 启动 ML Service (端口 8000)...${NC}"
+echo -e "${YELLOW}[3/6] 启动 ML Service (端口 8000)...${NC}"
 cd "$PROJECT_DIR/ml-service"
 source venv/bin/activate
 nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/ml-service.log 2>&1 &
@@ -36,7 +45,7 @@ ML_PID=$!
 echo "ML Service PID: $ML_PID"
 
 # 等待 ML Service 就绪
-echo -e "${YELLOW}[3/5] 等待 ML Service 就绪...${NC}"
+echo -e "${YELLOW}[4/6] 等待 ML Service 就绪...${NC}"
 for i in {1..60}; do
     if curl -sf http://127.0.0.1:8000/api/v1/health >/dev/null 2>&1; then
         echo -e "${GREEN}✓ ML Service 已就绪${NC}"
@@ -52,7 +61,7 @@ done
 echo ""
 
 # 启动 Go Backend
-echo -e "${YELLOW}[4/5] 启动 Go Backend (端口 8080)...${NC}"
+echo -e "${YELLOW}[5/6] 启动 Go Backend (端口 8080)...${NC}"
 cd "$PROJECT_DIR"
 export LLM_PROVIDER=openai
 export OPENAI_BASE_URL=https://api.deepseek.com/v1
@@ -73,7 +82,7 @@ else
 fi
 
 # 启动 Frontend
-echo -e "${YELLOW}[5/5] 启动 Frontend (端口 5173)...${NC}"
+echo -e "${YELLOW}[6/6] 启动 Frontend (端口 5173)...${NC}"
 cd "$PROJECT_DIR/web"
 nohup npm run dev > /tmp/frontend.log 2>&1 &
 FE_PID=$!
@@ -96,11 +105,13 @@ echo -e "访问地址:"
 echo -e "  ${BLUE}前端界面:${NC} http://localhost:5173"
 echo -e "  ${BLUE}后端 API:${NC} http://localhost:8080"
 echo -e "  ${BLUE}ML 服务:${NC}  http://localhost:8000"
+echo -e "  ${BLUE}Milvus:${NC}   localhost:19530"
+echo -e "  ${BLUE}Attu:${NC}     http://localhost:8000"
 echo ""
 echo -e "日志文件:"
 echo -e "  ${YELLOW}ML Service:${NC}  /tmp/ml-service.log"
 echo -e "  ${YELLOW}Go Backend:${NC}   /tmp/go-backend.log"
-echo -e "  ${Yellow}Frontend:${NC}     /tmp/frontend.log"
+echo -e "  ${YELLOW}Frontend:${NC}     /tmp/frontend.log"
 echo ""
 echo -e "停止服务: ${RED}./stop.sh${NC}"
 echo ""

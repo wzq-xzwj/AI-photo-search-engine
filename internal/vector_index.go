@@ -1,92 +1,86 @@
 package internal
 
 import (
-	"encoding/json"
 	"fmt"
-	"math"
 	"os"
-	"sort"
-	"sync"
+
+	"photo-search-engine/internal/vector"
 )
 
-// ImageEmbedding 图片嵌入向量条目
-type ImageEmbedding struct {
-	Path      string    `json:"path"`
-	Embedding []float32 `json:"embedding"`
-}
-
-// VectorIndex 向量索引（内存版）
+// VectorIndex 基于 Milvus 的向量索引
 type VectorIndex struct {
-	mu        sync.RWMutex
-	images    []ImageEmbedding
-	indexPath string
+	milvus *vector.MilvusIndex
 }
 
 // NewVectorIndex 创建新的向量索引
 func NewVectorIndex(indexPath string) *VectorIndex {
-	idx := &VectorIndex{
-		images:    make([]ImageEmbedding, 0),
-		indexPath: indexPath,
+	// 从环境变量获取 Milvus 地址
+	milvusAddr := os.Getenv("MILVUS_ADDRESS")
+	if milvusAddr == "" {
+		milvusAddr = "localhost:19530"
 	}
-	// 尝试从文件加载
-	idx.Load()
-	return idx
+
+	milvus, err := vector.NewMilvusIndex(milvusAddr)
+	if err != nil {
+		fmt.Printf("初始化 Milvus 失败: %v\n", err)
+		return nil
+	}
+
+	return &VectorIndex{
+		milvus: milvus,
+	}
 }
 
 // Add 添加图片嵌入向量
 func (vi *VectorIndex) Add(path string, embedding []float32) {
-	vi.mu.Lock()
-	defer vi.mu.Unlock()
-
-	// 检查是否已存在，更新而非重复添加
-	for i, img := range vi.images {
-		if img.Path == path {
-			vi.images[i].Embedding = embedding
-			return
-		}
+	if vi == nil || vi.milvus == nil {
+		return
 	}
 
-	vi.images = append(vi.images, ImageEmbedding{
-		Path:      path,
-		Embedding: embedding,
-	})
+	photoID := path // 使用路径作为 photoID
+	if err := vi.milvus.AddPhoto(photoID, path, embedding); err != nil {
+		fmt.Printf("添加向量失败: %v\n", err)
+	}
+}
+
+// BatchAdd 批量添加图片嵌入向量
+func (vi *VectorIndex) BatchAdd(items []ImageEmbedding) {
+	if vi == nil || vi.milvus == nil {
+		return
+	}
+
+	photoIDs := make([]string, len(items))
+	filePaths := make([]string, len(items))
+	vectors := make([][]float32, len(items))
+
+	for i, item := range items {
+		photoIDs[i] = item.Path
+		filePaths[i] = item.Path
+		vectors[i] = item.Embedding
+	}
+
+	if err := vi.milvus.AddPhotosBatch(photoIDs, filePaths, vectors); err != nil {
+		fmt.Printf("批量添加向量失败: %v\n", err)
+	}
 }
 
 // SearchByEmbedding 用嵌入向量搜索相似图片
 func (vi *VectorIndex) SearchByEmbedding(queryEmbedding []float32, limit int) []SearchResult {
-	vi.mu.RLock()
-	defer vi.mu.RUnlock()
-
-	if len(vi.images) == 0 {
+	if vi == nil || vi.milvus == nil {
 		return nil
 	}
 
-	type scored struct {
-		path  string
-		score float32
+	photoIDs, filePaths, scores, err := vi.milvus.Search(queryEmbedding, limit)
+	if err != nil {
+		fmt.Printf("搜索失败: %v\n", err)
+		return nil
 	}
 
-	scores := make([]scored, 0, len(vi.images))
-	for _, img := range vi.images {
-		sim := cosineSimilarity(queryEmbedding, img.Embedding)
-		scores = append(scores, scored{path: img.Path, score: sim})
-	}
-
-	// 按相似度降序排序
-	sort.Slice(scores, func(i, j int) bool {
-		return scores[i].score > scores[j].score
-	})
-
-	// 限制返回数量
-	if limit > len(scores) {
-		limit = len(scores)
-	}
-
-	results := make([]SearchResult, limit)
-	for i := 0; i < limit; i++ {
+	results := make([]SearchResult, len(photoIDs))
+	for i := range photoIDs {
 		results[i] = SearchResult{
-			Path:  scores[i].path,
-			Score: scores[i].score,
+			Path:  filePaths[i],
+			Score: scores[i],
 		}
 	}
 
@@ -95,103 +89,74 @@ func (vi *VectorIndex) SearchByEmbedding(queryEmbedding []float32, limit int) []
 
 // Size 返回索引中的图片数量
 func (vi *VectorIndex) Size() int {
-	vi.mu.RLock()
-	defer vi.mu.RUnlock()
-	return len(vi.images)
+	if vi == nil || vi.milvus == nil {
+		return 0
+	}
+
+	count, err := vi.milvus.GetStats()
+	if err != nil {
+		return 0
+	}
+	return int(count)
 }
 
 // GetAllPaths 返回所有图片路径
 func (vi *VectorIndex) GetAllPaths() []string {
-	vi.mu.RLock()
-	defer vi.mu.RUnlock()
-	paths := make([]string, len(vi.images))
-	for i, img := range vi.images {
-		paths[i] = img.Path
-	}
-	return paths
+	// Milvus 不直接支持获取所有路径，需要从 SQLite 获取
+	return nil
 }
 
 // GetAllImages 获取所有图片信息
 func (vi *VectorIndex) GetAllImages() []ImageEmbedding {
-	vi.mu.RLock()
-	defer vi.mu.RUnlock()
-	result := make([]ImageEmbedding, len(vi.images))
-	copy(result, vi.images)
-	return result
-}
-
-// Save 保存索引到文件
-func (vi *VectorIndex) Save() error {
-	vi.mu.RLock()
-	defer vi.mu.RUnlock()
-
-	data, err := json.Marshal(vi.images)
-	if err != nil {
-		return fmt.Errorf("序列化索引失败: %w", err)
-	}
-
-	if err := os.WriteFile(vi.indexPath, data, 0644); err != nil {
-		return fmt.Errorf("写入索引文件失败: %w", err)
-	}
-
+	// Milvus 不直接支持获取所有数据，需要从 SQLite 获取
 	return nil
 }
 
-// Load 从文件加载索引
+// Save 保存索引（Milvus 自动持久化，无需手动保存）
+func (vi *VectorIndex) Save() error {
+	// Milvus 自动持久化
+	return nil
+}
+
+// Load 加载索引（Milvus 自动加载）
 func (vi *VectorIndex) Load() error {
-	data, err := os.ReadFile(vi.indexPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // 文件不存在不算错误
-		}
-		return fmt.Errorf("读取索引文件失败: %w", err)
-	}
-
-	var images []ImageEmbedding
-	if err := json.Unmarshal(data, &images); err != nil {
-		return fmt.Errorf("解析索引文件失败: %w", err)
-	}
-
-	vi.images = images
+	// Milvus 自动加载
 	return nil
 }
 
 // Clear 清空索引
 func (vi *VectorIndex) Clear() {
-	vi.mu.Lock()
-	defer vi.mu.Unlock()
-	vi.images = vi.images[:0]
+	if vi == nil || vi.milvus == nil {
+		return
+	}
+
+	if err := vi.milvus.DropCollection(); err != nil {
+		fmt.Printf("清空索引失败: %v\n", err)
+	}
 }
 
 // HasImage 检查图片是否已在索引中
 func (vi *VectorIndex) HasImage(path string) bool {
-	vi.mu.RLock()
-	defer vi.mu.RUnlock()
-	for _, img := range vi.images {
-		if img.Path == path {
-			return true
-		}
-	}
+	// 需要从 SQLite 查询
 	return false
+}
+
+// Close 关闭连接
+func (vi *VectorIndex) Close() error {
+	if vi == nil || vi.milvus == nil {
+		return nil
+	}
+	return vi.milvus.Close()
+}
+
+// ImageEmbedding 图片嵌入向量条目
+type ImageEmbedding struct {
+	Path      string    `json:"path"`
+	Embedding []float32 `json:"embedding"`
 }
 
 // SearchResult 搜索结果
 type SearchResult struct {
 	Path  string  `json:"path"`
 	Score float32 `json:"score"`
-}
-
-// cosineSimilarity 计算两个向量的余弦相似度
-func cosineSimilarity(a, b []float32) float32 {
-	var dot, normA, normB float32
-	for i := range a {
-		dot += a[i] * b[i]
-		normA += a[i] * a[i]
-		normB += b[i] * b[i]
-	}
-	denom := float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB)))
-	if denom == 0 {
-		return 0
-	}
-	return dot / denom
 }
