@@ -19,11 +19,13 @@ func NewStatsHandler(idx *indexer.Index, logger *zap.Logger) *StatsHandler {
 }
 
 func (h *StatsHandler) HandleStats(c *gin.Context) {
-	stats := h.indexer.GetStats()
+	dir := c.Query("dir")
+	stats := h.indexer.GetStatsByDir(dir)
 	c.JSON(http.StatusOK, gin.H{
 		"total_photos":  stats.TotalPhotos,
 		"total_tags":    stats.TotalTags,
 		"total_size":    stats.TotalSize,
 		"vector_images": stats.VectorImages,
+		"tag_breakdown": stats.TagBreakdown,
 	})
 }

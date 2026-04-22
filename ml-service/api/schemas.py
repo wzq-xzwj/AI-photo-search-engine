@@ -42,6 +42,24 @@ class ClassifyResponse(BaseModel):
     results: list[ClassifyItem]
 
 
+class ClassifyBatchResponse(BaseModel):
+    results: list[list[ClassifyItem]]
+
+
+class SimilarityRequest(BaseModel):
+    labels: list[str]
+    top_k: int = Field(default=5, ge=1, le=50)
+
+
+class SimilarityItem(BaseModel):
+    label: str
+    score: float
+
+
+class SimilarityResponse(BaseModel):
+    results: list[list[SimilarityItem]]
+
+
 class TextEmbedResponse(BaseModel):
     embedding: list[float]
     dim: int

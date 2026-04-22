@@ -5,14 +5,16 @@ from __future__ import annotations
 import io
 
 import torch
-from fastapi import APIRouter, File, UploadFile, Depends, HTTPException
+from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form
 from PIL import Image
 
 from api.schemas import (
     ExtractResponse,
-    ClassifyRequest,
     ClassifyResponse,
+    ClassifyBatchResponse,
     ClassifyItem,
+    SimilarityResponse,
+    SimilarityItem,
     TextEmbedRequest,
     TextEmbedResponse,
     ChatRequest,
@@ -83,6 +85,59 @@ async def classify_image(
     data = await file.read()
     results = classifier.classify(data, top_k=top_k)
     return ClassifyResponse(results=[ClassifyItem(label=r.label, score=r.score) for r in results])
+
+
+@router.post("/classify/batch", response_model=ClassifyBatchResponse)
+async def classify_batch(
+    files: list[UploadFile] = File(...),
+    top_k: int = 5,
+    classifier: ImageClassifier = Depends(get_classifier),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    data_list = []
+    for file in files:
+        if not file.content_type or not file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="All files must be images")
+        data_list.append(await file.read())
+    batch_results = classifier.classify_batch(data_list, top_k=top_k)
+    return ClassifyBatchResponse(
+        results=[
+            [ClassifyItem(label=r.label, score=r.score) for r in row]
+            for row in batch_results
+        ]
+    )
+
+
+# ------------------------------------------------------------------
+# Similarity (raw cosine similarity, no softmax)
+# ------------------------------------------------------------------
+
+@router.post("/similarity/batch", response_model=SimilarityResponse)
+async def similarity_batch(
+    files: list[UploadFile] = File(...),
+    labels: str = Form(...),
+    top_k: int = Form(5),
+    classifier: ImageClassifier = Depends(get_classifier),
+):
+    import json
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    data_list = []
+    for file in files:
+        if not file.content_type or not file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="All files must be images")
+        data_list.append(await file.read())
+    label_list = json.loads(labels)
+    if not label_list:
+        raise HTTPException(status_code=400, detail="Labels required")
+    batch_results = classifier.similarity_batch(data_list, label_list, top_k=top_k)
+    return SimilarityResponse(
+        results=[
+            [SimilarityItem(label=r.label, score=r.score) for r in row]
+            for row in batch_results
+        ]
+    )
 
 
 # ------------------------------------------------------------------

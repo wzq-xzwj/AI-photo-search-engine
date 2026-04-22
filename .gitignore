@@ -36,6 +36,12 @@ logs/
 *.out
 coverage/
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
 # Data files (large generated files)
 vector_index.json
 *.index

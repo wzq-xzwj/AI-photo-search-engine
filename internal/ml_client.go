@@ -7,10 +7,12 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -25,15 +27,38 @@ type MLClient struct {
 	httpClient *http.Client
 }
 
-// NewMLClient 创建新的 ML 客户端
+// NewMLClient 创建新的 ML 客户端（带连接池）
 func NewMLClient(baseURL string) *MLClient {
 	if baseURL == "" {
 		baseURL = MLServiceURL
 	}
+
+	// 配置连接池
+	transport := &http.Transport{
+		// 连接池设置
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 10,
+		MaxConnsPerHost:     20,
+		// 空闲连接超时
+		IdleConnTimeout: 90 * time.Second,
+		// TLS 握手超时
+		TLSHandshakeTimeout: 10 * time.Second,
+		// 连接超时
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		// 禁用压缩（ML服务通常返回小数据）
+		DisableCompression: false,
+		// 强制尝试 HTTP/2
+		ForceAttemptHTTP2: true,
+	}
+
 	return &MLClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Transport: transport,
+			Timeout:   60 * time.Second, // 增加超时以支持批量请求
 		},
 	}
 }
@@ -42,6 +67,17 @@ func NewMLClient(baseURL string) *MLClient {
 type EmbeddingResponse struct {
 	Embedding []float32 `json:"embedding"`
 	Dim       int       `json:"dim"`
+}
+
+// ClassificationItem 单条分类结果
+type ClassificationItem struct {
+	Label string  `json:"label"`
+	Score float64 `json:"score"`
+}
+
+// ClassifyBatchResponse 批量分类响应
+type ClassifyBatchResponse struct {
+	Results [][]ClassificationItem `json:"results"`
 }
 
 // TextEmbedRequest 文本编码请求
@@ -149,6 +185,138 @@ func (c *MLClient) EncodeText(text string) ([]float32, error) {
 	}
 
 	return result.Embedding, nil
+}
+
+// ClassifyBatch 批量分类图片
+func (c *MLClient) ClassifyBatch(imagePaths []string, topK int) ([][]ClassificationItem, error) {
+	if len(imagePaths) == 0 {
+		return nil, nil
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	for _, imagePath := range imagePaths {
+		file, err := os.Open(imagePath)
+		if err != nil {
+			return nil, fmt.Errorf("打开图片文件失败: %w", err)
+		}
+		defer file.Close()
+
+		ext := filepath.Ext(imagePath)
+		mimeType := mime.TypeByExtension(ext)
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
+
+		h := make(map[string][]string)
+		h["Content-Disposition"] = []string{fmt.Sprintf(`form-data; name="files"; filename="%s"`, filepath.Base(imagePath))}
+		h["Content-Type"] = []string{mimeType}
+		part, err := writer.CreatePart(textproto.MIMEHeader(h))
+		if err != nil {
+			return nil, fmt.Errorf("创建 form 文件失败: %w", err)
+		}
+		if _, err := io.Copy(part, file); err != nil {
+			return nil, fmt.Errorf("复制文件内容失败: %w", err)
+		}
+	}
+	writer.Close()
+
+	url := fmt.Sprintf("%s/api/v1/classify/batch?top_k=%d", c.baseURL, topK)
+	req, err := http.NewRequest("POST", url, &body)
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 ML 服务失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ML 服务返回错误状态 %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result ClassifyBatchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析 ML 响应失败: %w", err)
+	}
+	return result.Results, nil
+}
+
+// SimilarityBatchResponse raw similarity response
+type SimilarityBatchResponse struct {
+	Results [][]ClassificationItem `json:"results"`
+}
+
+// SimilarityBatch 批量计算图片与标签的原始 cosine similarity（无 softmax）
+func (c *MLClient) SimilarityBatch(imagePaths []string, labels []string, topK int) ([][]ClassificationItem, error) {
+	if len(imagePaths) == 0 {
+		return nil, nil
+	}
+	if len(labels) == 0 {
+		return nil, fmt.Errorf("labels cannot be empty")
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	// 写入 files
+	for _, imagePath := range imagePaths {
+		file, err := os.Open(imagePath)
+		if err != nil {
+			return nil, fmt.Errorf("打开图片文件失败: %w", err)
+		}
+		defer file.Close()
+
+		ext := filepath.Ext(imagePath)
+		mimeType := mime.TypeByExtension(ext)
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
+
+		h := make(map[string][]string)
+		h["Content-Disposition"] = []string{fmt.Sprintf(`form-data; name="files"; filename="%s"`, filepath.Base(imagePath))}
+		h["Content-Type"] = []string{mimeType}
+		part, err := writer.CreatePart(textproto.MIMEHeader(h))
+		if err != nil {
+			return nil, fmt.Errorf("创建 form 文件失败: %w", err)
+		}
+		if _, err := io.Copy(part, file); err != nil {
+			return nil, fmt.Errorf("复制文件内容失败: %w", err)
+		}
+	}
+
+	// 写入 labels 和 top_k
+	labelsJSON, _ := json.Marshal(labels)
+	writer.WriteField("labels", string(labelsJSON))
+	writer.WriteField("top_k", strconv.Itoa(topK))
+	writer.Close()
+
+	url := fmt.Sprintf("%s/api/v1/similarity/batch", c.baseURL)
+	req, err := http.NewRequest("POST", url, &body)
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 ML 服务失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ML 服务返回错误状态 %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result SimilarityBatchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析 ML 响应失败: %w", err)
+	}
+	return result.Results, nil
 }
 
 // HealthCheck 检查 ML 服务是否可用

@@ -6,7 +6,7 @@ import io
 import torch
 import numpy as np
 from PIL import Image
-from transformers import CLIPModel, CLIPProcessor
+from transformers import AutoModel, AutoProcessor
 
 
 class ClipService:
@@ -17,8 +17,8 @@ class ClipService:
             import torch
             device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         self.device = device
-        self.model = CLIPModel.from_pretrained(model_name).to(self.device).eval()
-        self.processor = CLIPProcessor.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name, trust_remote_code=True).to(self.device).eval()
+        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
     # ------------------------------------------------------------------
     # Encoding

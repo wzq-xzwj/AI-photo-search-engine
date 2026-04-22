@@ -1,8 +1,11 @@
 import { useState, useEffect, Component, ReactNode } from 'react'
 import { Routes, Route } from 'react-router-dom'
 import Navbar from './components/Navbar'
+import ChatPanel from './components/ChatPanel'
 import Home from './pages/Home'
 import Search from './pages/Search'
+
+const SELECTED_DIR_KEY = 'photo-search-selected-dir'
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
   state = { hasError: false }
@@ -33,6 +36,12 @@ function App() {
     return false
   })
 
+  const [selectedDir, setSelectedDir] = useState<string>(() => {
+    try {
+      return localStorage.getItem(SELECTED_DIR_KEY) || ''
+    } catch { return '' }
+  })
+
   useEffect(() => {
     if (darkMode) {
       document.documentElement.classList.add('dark')
@@ -41,16 +50,28 @@ function App() {
     }
   }, [darkMode])
 
+  const handleDirChange = (dir: string) => {
+    setSelectedDir(dir)
+    try {
+      if (dir) {
+        localStorage.setItem(SELECTED_DIR_KEY, dir)
+      } else {
+        localStorage.removeItem(SELECTED_DIR_KEY)
+      }
+    } catch {}
+  }
+
   const toggleDarkMode = () => setDarkMode(!darkMode)
 
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-gray-50 dark:bg-dark-bg text-gray-900 dark:text-dark-text transition-colors duration-300">
-        <Navbar darkMode={darkMode} toggleDarkMode={toggleDarkMode} />
+        <Navbar darkMode={darkMode} toggleDarkMode={toggleDarkMode} selectedDir={selectedDir} onDirChange={handleDirChange} />
         <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/search" element={<Search />} />
+          <Route path="/" element={<Home selectedDir={selectedDir} />} />
+          <Route path="/search" element={<Search selectedDir={selectedDir} />} />
         </Routes>
+        <ChatPanel />
       </div>
     </ErrorBoundary>
   )

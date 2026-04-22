@@ -85,3 +85,20 @@ class ImageClassifier:
             top_idx = probs.argsort()[::-1][:top_k]
             results.append([ClassificationResult(label=use_labels[i], score=float(probs[i])) for i in top_idx])
         return results
+
+    def similarity_batch(
+        self,
+        images: list[Image.Image | bytes],
+        labels: list[str],
+        top_k: int = 5,
+    ) -> list[list[ClassificationResult]]:
+        """Compute raw cosine similarity between images and labels, return top-k."""
+        label_feats = self.clip.encode_text(labels)
+        img_feats = self.clip.encode_image_batch(images)
+        sims = img_feats @ label_feats.T  # (B, N)
+
+        results = []
+        for row in sims:
+            top_idx = row.argsort()[::-1][:top_k]
+            results.append([ClassificationResult(label=labels[i], score=float(row[i])) for i in top_idx])
+        return results

@@ -1,0 +1,426 @@
+package db
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+	"photo-search-engine/internal/indexer"
+)
+
+// DB SQLite数据库封装
+type DB struct {
+	conn *sql.DB
+}
+
+// New 创建并初始化数据库
+func New(dbPath string) (*DB, error) {
+	// 确保目录存在
+	dir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("创建数据库目录失败: %w", err)
+	}
+
+	conn, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("打开数据库失败: %w", err)
+	}
+
+	// 设置连接池
+	conn.SetMaxOpenConns(1) // SQLite 单写
+	conn.SetMaxIdleConns(1)
+	conn.SetConnMaxLifetime(time.Hour)
+
+	db := &DB{conn: conn}
+	if err := db.initSchema(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("初始化表结构失败: %w", err)
+	}
+
+	return db, nil
+}
+
+// Close 关闭数据库连接
+func (db *DB) Close() error {
+	return db.conn.Close()
+}
+
+// initSchema 初始化数据库表结构
+func (db *DB) initSchema() error {
+	schema := `
+CREATE TABLE IF NOT EXISTS photos (
+    id TEXT PRIMARY KEY,
+    path TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    date_time TEXT,
+    width INTEGER,
+    height INTEGER,
+    camera_make TEXT,
+    camera_model TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    photo_id TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    UNIQUE(photo_id, tag),
+    FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_tags_photo_id ON tags(photo_id);
+CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+
+CREATE TABLE IF NOT EXISTS search_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query TEXT NOT NULL,
+    result_count INTEGER DEFAULT 0,
+    filters TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_search_history_created ON search_history(created_at);
+
+CREATE TABLE IF NOT EXISTS vector_index (
+    path TEXT PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+`
+	_, err := db.conn.Exec(schema)
+	return err
+}
+
+// SavePhoto 保存或更新照片
+func (db *DB) SavePhoto(photo *indexer.Photo) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 插入或更新照片
+	_, err = tx.Exec(`
+		INSERT INTO photos (id, path, name, date_time, width, height, camera_make, camera_model, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(path) DO UPDATE SET
+			id = excluded.id,
+			name = excluded.name,
+			date_time = excluded.date_time,
+			width = excluded.width,
+			height = excluded.height,
+			camera_make = excluded.camera_make,
+			camera_model = excluded.camera_model,
+			updated_at = CURRENT_TIMESTAMP
+	`, photo.ID, photo.Path, photo.Name, photo.DateTime, photo.Width, photo.Height, photo.CameraMake, photo.CameraModel)
+	if err != nil {
+		return err
+	}
+
+	// 删除旧标签
+	_, err = tx.Exec(`DELETE FROM tags WHERE photo_id = ?`, photo.ID)
+	if err != nil {
+		return err
+	}
+
+	// 插入新标签
+	for _, tag := range photo.Tags {
+		_, err = tx.Exec(`INSERT INTO tags (photo_id, tag) VALUES (?, ?)`, photo.ID, tag)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// SavePhotos 批量保存照片
+func (db *DB) SavePhotos(photos []indexer.Photo) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmtPhoto, err := tx.Prepare(`
+		INSERT INTO photos (id, path, name, date_time, width, height, camera_make, camera_model, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(path) DO UPDATE SET
+			id = excluded.id,
+			name = excluded.name,
+			date_time = excluded.date_time,
+			width = excluded.width,
+			height = excluded.height,
+			camera_make = excluded.camera_make,
+			camera_model = excluded.camera_model,
+			updated_at = CURRENT_TIMESTAMP
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmtPhoto.Close()
+
+	stmtDelTags, err := tx.Prepare(`DELETE FROM tags WHERE photo_id = ?`)
+	if err != nil {
+		return err
+	}
+	defer stmtDelTags.Close()
+
+	stmtTag, err := tx.Prepare(`INSERT INTO tags (photo_id, tag) VALUES (?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmtTag.Close()
+
+	for _, photo := range photos {
+		_, err = stmtPhoto.Exec(photo.ID, photo.Path, photo.Name, photo.DateTime, photo.Width, photo.Height, photo.CameraMake, photo.CameraModel)
+		if err != nil {
+			return err
+		}
+
+		_, err = stmtDelTags.Exec(photo.ID)
+		if err != nil {
+			return err
+		}
+
+		for _, tag := range photo.Tags {
+			_, err = stmtTag.Exec(photo.ID, tag)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+// LoadPhotos 加载所有照片
+func (db *DB) LoadPhotos() ([]indexer.Photo, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, path, name, date_time, width, height, camera_make, camera_model
+		FROM photos
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var photos []indexer.Photo
+	for rows.Next() {
+		var p indexer.Photo
+		err := rows.Scan(&p.ID, &p.Path, &p.Name, &p.DateTime, &p.Width, &p.Height, &p.CameraMake, &p.CameraModel)
+		if err != nil {
+			return nil, err
+		}
+		photos = append(photos, p)
+	}
+
+	// 加载标签
+	for i := range photos {
+		tags, err := db.GetTagsByPhotoID(photos[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		photos[i].Tags = tags
+	}
+
+	return photos, rows.Err()
+}
+
+// GetTagsByPhotoID 获取照片标签
+func (db *DB) GetTagsByPhotoID(photoID string) ([]string, error) {
+	rows, err := db.conn.Query(`SELECT tag FROM tags WHERE photo_id = ?`, photoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tags []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
+}
+
+// UpdatePhotoTags 更新照片标签
+func (db *DB) UpdatePhotoTags(photoID string, tags []string) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`DELETE FROM tags WHERE photo_id = ?`, photoID)
+	if err != nil {
+		return err
+	}
+
+	for _, tag := range tags {
+		_, err = tx.Exec(`INSERT INTO tags (photo_id, tag) VALUES (?, ?)`, photoID, tag)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+// SaveSearchHistory 保存搜索历史
+func (db *DB) SaveSearchHistory(query string, resultCount int, filters map[string]string) error {
+	filtersJSON, _ := json.Marshal(filters)
+	_, err := db.conn.Exec(
+		`INSERT INTO search_history (query, result_count, filters) VALUES (?, ?, ?)`,
+		query, resultCount, string(filtersJSON),
+	)
+	return err
+}
+
+// GetSearchHistory 获取搜索历史
+func (db *DB) GetSearchHistory(limit int) ([]SearchHistoryItem, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, query, result_count, filters, created_at
+		FROM search_history
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var history []SearchHistoryItem
+	for rows.Next() {
+		var h SearchHistoryItem
+		var filtersJSON string
+		err := rows.Scan(&h.ID, &h.Query, &h.ResultCount, &filtersJSON, &h.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(filtersJSON), &h.Filters)
+		history = append(history, h)
+	}
+	return history, rows.Err()
+}
+
+// SearchHistoryItem 搜索历史记录
+ type SearchHistoryItem struct {
+	ID          int               `json:"id"`
+	Query       string            `json:"query"`
+	ResultCount int               `json:"result_count"`
+	Filters     map[string]string `json:"filters,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+}
+
+// SaveVector 保存向量
+func (db *DB) SaveVector(path string, embedding []float32) error {
+	data, err := json.Marshal(embedding)
+	if err != nil {
+		return err
+	}
+	_, err = db.conn.Exec(`
+		INSERT INTO vector_index (path, embedding, updated_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(path) DO UPDATE SET
+			embedding = excluded.embedding,
+			updated_at = CURRENT_TIMESTAMP
+	`, path, data)
+	return err
+}
+
+// LoadVectors 加载所有向量
+func (db *DB) LoadVectors() (map[string][]float32, error) {
+	rows, err := db.conn.Query(`SELECT path, embedding FROM vector_index`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	vectors := make(map[string][]float32)
+	for rows.Next() {
+		var path string
+		var data []byte
+		if err := rows.Scan(&path, &data); err != nil {
+			return nil, err
+		}
+		var embedding []float32
+		if err := json.Unmarshal(data, &embedding); err != nil {
+			continue // 跳过损坏的数据
+		}
+		vectors[path] = embedding
+	}
+	return vectors, rows.Err()
+}
+
+// DeletePhoto 删除照片
+func (db *DB) DeletePhoto(photoID string) error {
+	_, err := db.conn.Exec(`DELETE FROM photos WHERE id = ?`, photoID)
+	return err
+}
+
+// GetPhotoCount 获取照片总数
+func (db *DB) GetPhotoCount() (int, error) {
+	var count int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM photos`).Scan(&count)
+	return count, err
+}
+
+// MigrateFromJSON 从 JSON 文件迁移数据到 SQLite
+func (db *DB) MigrateFromJSON(photosPath, tagsPath string) error {
+	// 迁移照片数据
+	if _, err := os.Stat(photosPath); err == nil {
+		data, err := os.ReadFile(photosPath)
+		if err != nil {
+			return fmt.Errorf("读取照片JSON失败: %w", err)
+		}
+		var photos []indexer.Photo
+		if err := json.Unmarshal(data, &photos); err != nil {
+			return fmt.Errorf("解析照片JSON失败: %w", err)
+		}
+		if err := db.SavePhotos(photos); err != nil {
+			return fmt.Errorf("保存照片到数据库失败: %w", err)
+		}
+		fmt.Printf("已迁移 %d 张照片到 SQLite\n", len(photos))
+	}
+
+	// 迁移标签数据
+	if _, err := os.Stat(tagsPath); err == nil {
+		data, err := os.ReadFile(tagsPath)
+		if err != nil {
+			return fmt.Errorf("读取标签JSON失败: %w", err)
+		}
+		var tagMap map[string][]string
+		if err := json.Unmarshal(data, &tagMap); err != nil {
+			return fmt.Errorf("解析标签JSON失败: %w", err)
+		}
+
+		// 需要先加载照片以获取ID映射
+		photos, err := db.LoadPhotos()
+		if err != nil {
+			return err
+		}
+		pathToID := make(map[string]string)
+		for _, p := range photos {
+			pathToID[p.Path] = p.ID
+		}
+
+		for path, tags := range tagMap {
+			if photoID, ok := pathToID[path]; ok {
+				if err := db.UpdatePhotoTags(photoID, tags); err != nil {
+					fmt.Printf("迁移标签失败 %s: %v\n", path, err)
+				}
+			}
+		}
+		fmt.Printf("已迁移 %d 条标签记录到 SQLite\n", len(tagMap))
+	}
+
+	return nil
+}

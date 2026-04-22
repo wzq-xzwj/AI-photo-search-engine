@@ -100,6 +100,17 @@ func (vi *VectorIndex) Size() int {
 	return len(vi.images)
 }
 
+// GetAllPaths 返回所有图片路径
+func (vi *VectorIndex) GetAllPaths() []string {
+	vi.mu.RLock()
+	defer vi.mu.RUnlock()
+	paths := make([]string, len(vi.images))
+	for i, img := range vi.images {
+		paths[i] = img.Path
+	}
+	return paths
+}
+
 // GetAllImages 获取所有图片信息
 func (vi *VectorIndex) GetAllImages() []ImageEmbedding {
 	vi.mu.RLock()
