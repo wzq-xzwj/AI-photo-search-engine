@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --color-primary: #8155ff;
+    --color-secondary: #008393;
+    --color-accent: #e1266c;
+    --color-dark-bg: #0F111A;
+    --color-light-bg: #ffffff;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply font-sans antialiased;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply px-6 py-3 bg-primary-500 text-white font-semibold rounded-xl
+           hover:bg-primary-600 active:bg-primary-700
+           transition-all duration-200 shadow-glow-sm hover:shadow-glow;
+  }
+
+  .btn-secondary {
+    @apply px-6 py-3 bg-secondary-500 text-white font-semibold rounded-xl
+           hover:bg-secondary-600 active:bg-secondary-700
+           transition-all duration-200;
+  }
+
+  .btn-outline {
+    @apply px-6 py-3 border-2 border-primary-500 text-primary-500 font-semibold rounded-xl
+           hover:bg-primary-500 hover:text-white
+           dark:border-primary-400 dark:text-primary-400
+           dark:hover:bg-primary-500 dark:hover:text-white
+           transition-all duration-200;
+  }
+
+  .glass {
+    @apply bg-white/80 backdrop-blur-xl border border-white/20;
+  }
+
+  .glass-dark {
+    @apply bg-dark-surface/80 backdrop-blur-xl border border-dark-border/30;
+  }
+
+  .card {
+    @apply bg-white rounded-2xl shadow-card border border-gray-100/50;
+  }
+
+  .card-dark {
+    @apply bg-dark-card rounded-2xl shadow-card-dark border border-dark-border/30;
+  }
+
+  .input-field {
+    @apply w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50/50
+           focus:outline-none focus:ring-2 focus:ring-primary-500/50 focus:border-primary-500
+           dark:bg-dark-surface dark:border-dark-border dark:text-dark-text
+           dark:focus:ring-primary-400/50 dark:focus:border-primary-400
+           transition-all duration-200 placeholder:text-gray-400 dark:placeholder:text-dark-muted;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(129, 85, 255, 0.3) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: rgba(129, 85, 255, 0.3);
+    border-radius: 3px;
+  }
+
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-primary-500 via-accent-500 to-secondary-500;
+  }
+}

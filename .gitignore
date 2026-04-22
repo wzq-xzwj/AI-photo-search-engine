@@ -1,0 +1,51 @@
+# Dependencies
+web/node_modules/
+ml-service/venv/
+
+# Build outputs
+web/dist/
+web/build/
+photo-server
+server
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+*.out
+coverage/
+
+# Data files (large generated files)
+vector_index.json
+*.index
+*.pt
+*.pth
+*.ckpt
+ml-service/data/
+ml-service/models/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

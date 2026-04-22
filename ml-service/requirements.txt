@@ -1,0 +1,11 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.0
+pydantic-settings>=2.0
+python-multipart>=0.0.9
+torch>=2.0
+torchvision>=0.15
+transformers>=4.37
+Pillow>=10.0
+numpy>=1.24
+faiss-cpu>=1.7
