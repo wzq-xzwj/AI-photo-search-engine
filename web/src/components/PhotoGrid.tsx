@@ -17,6 +17,8 @@ interface PhotoGridProps {
   photos?: Photo[]
   loading?: boolean
   dir?: string
+  hasMore?: boolean
+  onLoadMore?: () => void
 }
 
 function getColumns() {
@@ -29,8 +31,88 @@ function getColumns() {
 const GAP = 16
 const ROW_HEIGHT_ESTIMATE = 220
 const PAGE_SIZE = 30
+const OVERSCAN_ROWS = 3
 
-export default function PhotoGrid({ photos: propPhotos, loading: propLoading = false, dir = '' }: PhotoGridProps) {
+// 使用 IntersectionObserver 进行图片懒加载
+function useLazyImage(src: string, placeholder: string) {
+  const [imgSrc, setImgSrc] = useState(placeholder)
+  const imgRef = useRef<HTMLImageElement>(null)
+
+  useEffect(() => {
+    const img = imgRef.current
+    if (!img) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            setImgSrc(src)
+            observer.disconnect()
+          }
+        })
+      },
+      { rootMargin: '200px' }
+    )
+
+    observer.observe(img)
+    return () => observer.disconnect()
+  }, [src])
+
+  return { imgSrc, imgRef }
+}
+
+// 单个照片卡片组件 - 独立减少重渲染
+const PhotoCard = React.memo(function PhotoCard({
+  photo,
+  index,
+  onClick,
+}: {
+  photo: Photo
+  index: number
+  onClick: (photo: Photo) => void
+}) {
+  const { imgSrc, imgRef } = useLazyImage(photo.thumbnail, '')
+
+  return (
+    <div
+      className="group relative rounded-xl overflow-hidden cursor-pointer animate-fade-in bg-gray-100 dark:bg-dark-surface"
+      style={{ animationDelay: `${(index % 12) * 50}ms` }}
+      onClick={() => onClick(photo)}
+    >
+      <div className="aspect-[4/3] relative">
+        <img
+          ref={imgRef}
+          src={imgSrc}
+          alt={photo.title}
+          className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+          loading="lazy"
+        />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+        <div className="absolute bottom-0 left-0 right-0 p-3 transform translate-y-full group-hover:translate-y-0 transition-transform duration-300">
+          <p className="text-white text-sm font-medium truncate">{photo.title}</p>
+          <p className="text-white/70 text-xs mt-0.5">{photo.date}</p>
+        </div>
+      </div>
+      <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+        {photo.tags.slice(0, 2).map((tag) => (
+          <span key={tag} className="px-2 py-0.5 text-xs rounded-full bg-primary-500/90 text-white backdrop-blur-sm">
+            {tag}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+})
+
+import React from 'react'
+
+export default function PhotoGrid({
+  photos: propPhotos,
+  loading: propLoading = false,
+  dir = '',
+  hasMore: propHasMore,
+  onLoadMore: propOnLoadMore,
+}: PhotoGridProps) {
   const [selectedPhoto, setSelectedPhoto] = useState<Photo | null>(null)
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 40 })
   const [realPhotos, setRealPhotos] = useState<Photo[]>([])
@@ -40,12 +122,24 @@ export default function PhotoGrid({ photos: propPhotos, loading: propLoading = f
   const [loadingMore, setLoadingMore] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const loadMoreRef = useRef<HTMLDivElement>(null)
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const isSearchMode = !!propPhotos
 
-  // 窗口大小变化
+  // 窗口大小变化 - 使用防抖
   useEffect(() => {
-    const handleResize = () => setColumns(getColumns())
+    let resizeTimeout: ReturnType<typeof setTimeout>
+    const handleResize = () => {
+      clearTimeout(resizeTimeout)
+      resizeTimeout = setTimeout(() => {
+        const newCols = getColumns()
+        setColumns(newCols)
+      }, 150)
+    }
     window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      clearTimeout(resizeTimeout)
+    }
   }, [])
 
   // 列数变化时重算可见范围
@@ -53,8 +147,8 @@ export default function PhotoGrid({ photos: propPhotos, loading: propLoading = f
     if (containerRef.current) {
       const { scrollTop, clientHeight } = containerRef.current
       const rowHeight = ROW_HEIGHT_ESTIMATE + GAP
-      const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2)
-      const endRow = Math.ceil((scrollTop + clientHeight) / rowHeight) + 2
+      const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS)
+      const endRow = Math.ceil((scrollTop + clientHeight) / rowHeight) + OVERSCAN_ROWS
       const currentPhotos = propPhotos || realPhotos
       const start = startRow * columns
       const end = Math.min(currentPhotos.length, endRow * columns)
@@ -117,41 +211,61 @@ export default function PhotoGrid({ photos: propPhotos, loading: propLoading = f
     return realPhotos
   }, [propPhotos, realPhotos])
 
-  const hasMore = !propPhotos && photos.length < total
+  const hasMore = isSearchMode
+    ? (propHasMore ?? false)
+    : (photos.length < total)
 
-  // 无限滚动
+  const onLoadMore = isSearchMode
+    ? propOnLoadMore
+    : () => fetchPhotos(page + 1, true)
+
+  // 无限滚动 - 使用 IntersectionObserver
   useEffect(() => {
-    if (propPhotos || !loadMoreRef.current) return
+    if (!loadMoreRef.current || !hasMore || !onLoadMore) return
+
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0].isIntersecting && hasMore && !loadingMore) {
-          fetchPhotos(page + 1, true)
+          onLoadMore()
         }
       },
       { root: containerRef.current, threshold: 0.1 }
     )
     observer.observe(loadMoreRef.current)
     return () => observer.disconnect()
-  }, [propPhotos, hasMore, loadingMore, page, fetchPhotos])
+  }, [hasMore, loadingMore, onLoadMore])
 
-  // Virtual scroll
+  // Virtual scroll - 使用防抖优化滚动计算
   const handleScroll = useCallback(() => {
     if (!containerRef.current) return
-    const cols = getColumns()
-    const rowHeight = ROW_HEIGHT_ESTIMATE + GAP
-    const { scrollTop, clientHeight } = containerRef.current
-    const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - 2)
-    const endRow = Math.ceil((scrollTop + clientHeight) / rowHeight) + 2
-    const start = startRow * cols
-    const end = Math.min(photos.length, endRow * cols)
-    setVisibleRange({ start, end })
+
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current)
+    }
+
+    scrollTimeoutRef.current = setTimeout(() => {
+      if (!containerRef.current) return
+      const cols = getColumns()
+      const rowHeight = ROW_HEIGHT_ESTIMATE + GAP
+      const { scrollTop, clientHeight } = containerRef.current
+      const startRow = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN_ROWS)
+      const endRow = Math.ceil((scrollTop + clientHeight) / rowHeight) + OVERSCAN_ROWS
+      const start = startRow * cols
+      const end = Math.min(photos.length, endRow * cols)
+      setVisibleRange({ start, end })
+    }, 16) // ~60fps
   }, [photos.length])
 
   useEffect(() => {
     const container = containerRef.current
     if (container) {
       container.addEventListener('scroll', handleScroll, { passive: true })
-      return () => container.removeEventListener('scroll', handleScroll)
+      return () => {
+        container.removeEventListener('scroll', handleScroll)
+        if (scrollTimeoutRef.current) {
+          clearTimeout(scrollTimeoutRef.current)
+        }
+      }
     }
   }, [handleScroll])
 
@@ -224,40 +338,19 @@ export default function PhotoGrid({ photos: propPhotos, loading: propLoading = f
             <div style={{ height: topSpacerHeight, gridColumn: `1 / -1` }} />
           )}
           {visiblePhotos.map((photo, index) => (
-            <div
+            <PhotoCard
               key={photo.id}
-              className="group relative rounded-xl overflow-hidden cursor-pointer animate-fade-in bg-gray-100 dark:bg-dark-surface"
-              style={{ animationDelay: `${(index % 12) * 50}ms` }}
-              onClick={() => setSelectedPhoto(photo)}
-            >
-              <div className="aspect-[4/3] relative">
-                <img
-                  src={photo.thumbnail}
-                  alt={photo.title}
-                  className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-                  loading="lazy"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-                <div className="absolute bottom-0 left-0 right-0 p-3 transform translate-y-full group-hover:translate-y-0 transition-transform duration-300">
-                  <p className="text-white text-sm font-medium truncate">{photo.title}</p>
-                  <p className="text-white/70 text-xs mt-0.5">{photo.date}</p>
-                </div>
-              </div>
-              <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                {photo.tags.slice(0, 2).map((tag) => (
-                  <span key={tag} className="px-2 py-0.5 text-xs rounded-full bg-primary-500/90 text-white backdrop-blur-sm">
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            </div>
+              photo={photo}
+              index={visibleRange.start + index}
+              onClick={setSelectedPhoto}
+            />
           ))}
           {bottomSpacerHeight > 0 && (
             <div style={{ height: bottomSpacerHeight, gridColumn: `1 / -1` }} />
           )}
 
           {/* 无限滚动触发器 / 加载提示 */}
-          {!propPhotos && (
+          {(hasMore || loadingMore || photos.length > 0) && (
             <div
               ref={loadMoreRef}
               className="col-span-full py-6 text-center"

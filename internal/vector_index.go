@@ -14,7 +14,7 @@ type VectorIndex struct {
 
 // NewVectorIndex 创建新的向量索引
 func NewVectorIndex(indexPath string) *VectorIndex {
-	// 从环境变量获取 Milvus 地址
+	// 从环境变量获取 Milvus 配置
 	milvusAddr := os.Getenv("MILVUS_ADDRESS")
 	if milvusAddr == "" {
 		milvusAddr = "localhost:19530"

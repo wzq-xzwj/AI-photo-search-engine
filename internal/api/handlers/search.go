@@ -43,8 +43,19 @@ func (h *SearchHandler) HandleSearch(c *gin.Context) {
 		return
 	}
 
+	pageStr := c.DefaultQuery("page", "1")
+	pageSizeStr := c.DefaultQuery("page_size", "20")
+	page, _ := strconv.Atoi(pageStr)
+	pageSize, _ := strconv.Atoi(pageSizeStr)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+
 	limitStr := c.DefaultQuery("limit", "20")
-	limit, _ := strconv.Atoi(limitStr)
+	_, _ = strconv.Atoi(limitStr) // limit 保留兼容，实际用 pageSize
 
 	// 获取过滤参数
 	period := c.DefaultQuery("period", "all")
@@ -120,7 +131,7 @@ func (h *SearchHandler) HandleSearch(c *gin.Context) {
 
 	// 过滤结果并附加L2标签
 	queryOnlyTime := searchQuery == "" && (dateFrom != "" || dateTo != "")
-	filtered := make([]photoWithL2, 0, limit)
+	allFiltered := make([]photoWithL2, 0)
 	for _, p := range results {
 		// 目录过滤
 		if dir != "" && !strings.HasPrefix(p.Path, dir) {
@@ -160,10 +171,24 @@ func (h *SearchHandler) HandleSearch(c *gin.Context) {
 		if h.l2Engine != nil {
 			pw.L2 = h.l2Engine.Infer(p.Tags)
 		}
-		filtered = append(filtered, pw)
-		if len(filtered) >= limit {
-			break
-		}
+		allFiltered = append(allFiltered, pw)
+	}
+
+	// 分页
+	total := len(allFiltered)
+	start := (page - 1) * pageSize
+	end := start + pageSize
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+	var filtered []photoWithL2
+	if start < total {
+		filtered = allFiltered[start:end]
+	} else {
+		filtered = []photoWithL2{}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -173,6 +198,8 @@ func (h *SearchHandler) HandleSearch(c *gin.Context) {
 		"date_from":  dateFrom,
 		"date_to":    dateTo,
 		"results":    filtered,
-		"total":      len(filtered),
+		"total":      total,
+		"page":       page,
+		"page_size":  pageSize,
 	})
 }
