@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
 
 
 # ---- Requests ----
@@ -24,6 +25,39 @@ class TextEmbedRequest(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str = "default"
     message: str
+
+
+# ---- Face Detection ----
+
+class FaceDetectRequest(BaseModel):
+    image_path: str
+
+
+class FaceLocation(BaseModel):
+    top: int
+    right: int
+    bottom: int
+    left: int
+
+
+class FaceInfo(BaseModel):
+    index: int
+    location: FaceLocation
+    encoding: List[float]
+    confidence: float = 0.99
+
+
+class FaceDetectResponse(BaseModel):
+    image_path: str
+    face_count: int
+    faces: List[FaceInfo]
+    available: bool = True
+
+
+class FaceThumbnailRequest(BaseModel):
+    image_path: str
+    location: FaceLocation
+    size: int = Field(default=150, ge=50, le=500)
 
 
 # ---- Responses ----
@@ -79,3 +113,4 @@ class HealthResponse(BaseModel):
     model: str
     device: str
     index_size: int
+    face_detection_available: bool = False

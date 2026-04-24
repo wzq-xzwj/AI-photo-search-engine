@@ -9,3 +9,5 @@ transformers>=4.37
 Pillow>=10.0
 numpy>=1.24
 faiss-cpu>=1.7
+face_recognition>=1.3.0
+dlib>=19.24

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 
 import torch
 from fastapi import APIRouter, File, UploadFile, Depends, HTTPException, Form
@@ -20,6 +21,11 @@ from api.schemas import (
     ChatRequest,
     ChatResponse,
     HealthResponse,
+    FaceDetectRequest,
+    FaceDetectResponse,
+    FaceInfo,
+    FaceLocation,
+    FaceThumbnailRequest,
 )
 from services.clip_service import ClipService
 from services.classifier import ImageClassifier
@@ -46,12 +52,133 @@ async def health(
     emb: EmbeddingService = Depends(get_embedding_service),
 ):
     settings = get_settings()
+    
+    # Check face detection availability
+    face_available = False
+    try:
+        from face_detection import detector
+        face_available = detector.available
+    except ImportError:
+        pass
+    
     return HealthResponse(
         status="ok",
         model=settings.clip_model_name,
         device="cuda" if torch.cuda.is_available() else "cpu",
         index_size=emb.size,
+        face_detection_available=face_available,
     )
+
+
+# ------------------------------------------------------------------
+# Face Detection
+# ------------------------------------------------------------------
+
+@router.post("/faces/detect", response_model=FaceDetectResponse)
+async def detect_faces(
+    body: FaceDetectRequest,
+):
+    """检测照片中的人脸"""
+    try:
+        from face_detection import detector
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Face detection not available: {e}")
+    
+    if not detector.available:
+        raise HTTPException(status_code=503, detail="face_recognition library not installed")
+    
+    image_path = body.image_path
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail=f"Image not found: {image_path}")
+    
+    try:
+        faces = detector.detect(image_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Face detection failed: {e}")
+    
+    return FaceDetectResponse(
+        image_path=image_path,
+        face_count=len(faces),
+        faces=[
+            FaceInfo(
+                index=f["index"],
+                location=FaceLocation(**f["location"]),
+                encoding=f["encoding"],
+                confidence=f["confidence"],
+            )
+            for f in faces
+        ],
+        available=True,
+    )
+
+
+@router.post("/faces/detect-file", response_model=FaceDetectResponse)
+async def detect_faces_file(
+    file: UploadFile = File(...),
+):
+    """从上传文件检测人脸"""
+    try:
+        from face_detection import detector
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Face detection not available: {e}")
+    
+    if not detector.available:
+        raise HTTPException(status_code=503, detail="face_recognition library not installed")
+    
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+    
+    data = await file.read()
+    
+    try:
+        faces = detector.detect_from_bytes(data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Face detection failed: {e}")
+    
+    return FaceDetectResponse(
+        image_path=file.filename or "uploaded",
+        face_count=len(faces),
+        faces=[
+            FaceInfo(
+                index=f["index"],
+                location=FaceLocation(**f["location"]),
+                encoding=f["encoding"],
+                confidence=f["confidence"],
+            )
+            for f in faces
+        ],
+        available=True,
+    )
+
+
+@router.post("/faces/thumbnail")
+async def extract_face_thumbnail(
+    body: FaceThumbnailRequest,
+):
+    """提取人脸缩略图，返回 JPEG 字节"""
+    try:
+        from face_detection import detector
+    except ImportError as e:
+        raise HTTPException(status_code=503, detail=f"Face detection not available: {e}")
+    
+    if not detector.available:
+        raise HTTPException(status_code=503, detail="face_recognition library not installed")
+    
+    image_path = body.image_path
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail=f"Image not found: {image_path}")
+    
+    try:
+        thumbnail_bytes = detector.extract_thumbnail(
+            image_path,
+            body.location.model_dump(),
+            size=body.size,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Thumbnail extraction failed: {e}")
+    
+    from fastapi.responses import Response
+    return Response(content=thumbnail_bytes, media_type="image/jpeg")
 
 
 # ------------------------------------------------------------------

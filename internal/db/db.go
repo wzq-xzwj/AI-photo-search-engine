@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS photos (
     height INTEGER,
     camera_make TEXT,
     camera_model TEXT,
+    face_count INTEGER DEFAULT 0,
+    has_faces BOOLEAN DEFAULT FALSE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -90,6 +92,34 @@ CREATE TABLE IF NOT EXISTS vector_index (
     path TEXT PRIMARY KEY,
     embedding BLOB NOT NULL,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS faces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    photo_id TEXT NOT NULL,
+    face_index INTEGER NOT NULL,
+    person_id TEXT,
+    location TEXT NOT NULL,
+    encoding TEXT NOT NULL,
+    confidence REAL DEFAULT 0.99,
+    thumbnail_path TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(photo_id, face_index),
+    FOREIGN KEY (photo_id) REFERENCES photos(id) ON DELETE CASCADE,
+    FOREIGN KEY (person_id) REFERENCES persons(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_faces_photo_id ON faces(photo_id);
+CREATE INDEX IF NOT EXISTS idx_faces_person_id ON faces(person_id);
+
+CREATE TABLE IF NOT EXISTS persons (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    avatar TEXT,
+    face_count INTEGER DEFAULT 0,
+    photo_count INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 `
 	_, err := db.conn.Exec(schema)
@@ -423,4 +453,234 @@ func (db *DB) MigrateFromJSON(photosPath, tagsPath string) error {
 	}
 
 	return nil
+}
+
+// ---- Face Recognition Methods ----
+
+// FaceRecord 人脸记录
+ type FaceRecord struct {
+	ID           int       `json:"id"`
+	PhotoID      string    `json:"photo_id"`
+	FaceIndex    int       `json:"face_index"`
+	PersonID     *string   `json:"person_id,omitempty"`
+	Location     string    `json:"location"`
+	Encoding     string    `json:"encoding"`
+	Confidence   float64   `json:"confidence"`
+	ThumbnailPath string `json:"thumbnail_path,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// Person 人物记录
+ type Person struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Avatar     string    `json:"avatar,omitempty"`
+	FaceCount  int       `json:"face_count"`
+	PhotoCount int       `json:"photo_count"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// SaveFaces 保存人脸检测结果
+func (db *DB) SaveFaces(photoID string, faces []FaceRecord) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// 删除该照片的旧人脸记录
+	_, err = tx.Exec(`DELETE FROM faces WHERE photo_id = ?`, photoID)
+	if err != nil {
+		return err
+	}
+
+	// 插入新人脸记录
+	for _, face := range faces {
+		_, err = tx.Exec(`
+			INSERT INTO faces (photo_id, face_index, person_id, location, encoding, confidence, thumbnail_path, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		`, photoID, face.FaceIndex, face.PersonID, face.Location, face.Encoding, face.Confidence, face.ThumbnailPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	// 更新照片的人脸统计
+	hasFaces := len(faces) > 0
+	_, err = tx.Exec(`
+		UPDATE photos SET face_count = ?, has_faces = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, len(faces), hasFaces, photoID)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// GetFacesByPhotoID 获取照片的人脸列表
+func (db *DB) GetFacesByPhotoID(photoID string) ([]FaceRecord, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, photo_id, face_index, person_id, location, encoding, confidence, thumbnail_path, created_at, updated_at
+		FROM faces WHERE photo_id = ? ORDER BY face_index
+	`, photoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var faces []FaceRecord
+	for rows.Next() {
+		var f FaceRecord
+		var personID sql.NullString
+		err := rows.Scan(&f.ID, &f.PhotoID, &f.FaceIndex, &personID, &f.Location, &f.Encoding, &f.Confidence, &f.ThumbnailPath, &f.CreatedAt, &f.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if personID.Valid {
+			f.PersonID = &personID.String
+		}
+		faces = append(faces, f)
+	}
+	return faces, rows.Err()
+}
+
+// GetFaceByID 获取单个人脸详情
+func (db *DB) GetFaceByID(faceID int) (*FaceRecord, error) {
+	var f FaceRecord
+	var personID sql.NullString
+	err := db.conn.QueryRow(`
+		SELECT id, photo_id, face_index, person_id, location, encoding, confidence, thumbnail_path, created_at, updated_at
+		FROM faces WHERE id = ?
+	`, faceID).Scan(&f.ID, &f.PhotoID, &f.FaceIndex, &personID, &f.Location, &f.Encoding, &f.Confidence, &f.ThumbnailPath, &f.CreatedAt, &f.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if personID.Valid {
+		f.PersonID = &personID.String
+	}
+	return &f, nil
+}
+
+// UpdateFaceLabel 更新人脸标注
+func (db *DB) UpdateFaceLabel(faceID int, personID string) error {
+	_, err := db.conn.Exec(`
+		UPDATE faces SET person_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, personID, faceID)
+	return err
+}
+
+// CreatePerson 创建人物
+func (db *DB) CreatePerson(person *Person) error {
+	_, err := db.conn.Exec(`
+		INSERT INTO persons (id, name, avatar, face_count, photo_count, created_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	`, person.ID, person.Name, person.Avatar, person.FaceCount, person.PhotoCount)
+	return err
+}
+
+// GetPersonByID 获取人物详情
+func (db *DB) GetPersonByID(personID string) (*Person, error) {
+	var p Person
+	err := db.conn.QueryRow(`
+		SELECT id, name, avatar, face_count, photo_count, created_at
+		FROM persons WHERE id = ?
+	`, personID).Scan(&p.ID, &p.Name, &p.Avatar, &p.FaceCount, &p.PhotoCount, &p.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// GetPersons 获取人物列表
+func (db *DB) GetPersons(limit, offset int) ([]Person, int, error) {
+	var total int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM persons`).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := db.conn.Query(`
+		SELECT id, name, avatar, face_count, photo_count, created_at
+		FROM persons ORDER BY name LIMIT ? OFFSET ?
+	`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var persons []Person
+	for rows.Next() {
+		var p Person
+		err := rows.Scan(&p.ID, &p.Name, &p.Avatar, &p.FaceCount, &p.PhotoCount, &p.CreatedAt)
+		if err != nil {
+			return nil, 0, err
+		}
+		persons = append(persons, p)
+	}
+	return persons, total, rows.Err()
+}
+
+// UpdatePersonStats 更新人物统计
+func (db *DB) UpdatePersonStats(personID string) error {
+	_, err := db.conn.Exec(`
+		UPDATE persons SET
+			face_count = (SELECT COUNT(*) FROM faces WHERE person_id = ?),
+			photo_count = (SELECT COUNT(DISTINCT photo_id) FROM faces WHERE person_id = ?)
+		WHERE id = ?
+	`, personID, personID, personID)
+	return err
+}
+
+// SearchPhotosByPerson 按人物搜索照片
+func (db *DB) SearchPhotosByPerson(personID string, limit, offset int) ([]indexer.Photo, int, error) {
+	var total int
+	err := db.conn.QueryRow(`
+		SELECT COUNT(DISTINCT photo_id) FROM faces WHERE person_id = ?
+	`, personID).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := db.conn.Query(`
+		SELECT DISTINCT p.id, p.path, p.name, p.date_time, p.width, p.height, p.camera_make, p.camera_model
+		FROM photos p
+		JOIN faces f ON p.id = f.photo_id
+		WHERE f.person_id = ?
+		ORDER BY p.date_time DESC
+		LIMIT ? OFFSET ?
+	`, personID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var photos []indexer.Photo
+	for rows.Next() {
+		var p indexer.Photo
+		err := rows.Scan(&p.ID, &p.Path, &p.Name, &p.DateTime, &p.Width, &p.Height, &p.CameraMake, &p.CameraModel)
+		if err != nil {
+			return nil, 0, err
+		}
+		photos = append(photos, p)
+	}
+
+	// 加载标签
+	for i := range photos {
+		tags, err := db.GetTagsByPhotoID(photos[i].ID)
+		if err == nil {
+			photos[i].Tags = tags
+		}
+	}
+
+	return photos, total, rows.Err()
+}
+
+// GetPhotoPathByID 通过ID获取照片路径
+func (db *DB) GetPhotoPathByID(photoID string) (string, error) {
+	var path string
+	err := db.conn.QueryRow(`SELECT path FROM photos WHERE id = ?`, photoID).Scan(&path)
+	return path, err
 }
