@@ -58,7 +58,7 @@ export default function ChatPanel() {
       {/* Floating button */}
       <button
         onClick={() => setOpen(!open)}
-        className="fixed bottom-6 right-6 z-40 w-14 h-14 rounded-full bg-primary-500 hover:bg-primary-600 text-white shadow-lg flex items-center justify-center transition-transform hover:scale-105"
+        className={`fixed bottom-6 right-6 w-14 h-14 rounded-full bg-primary-500 hover:bg-primary-600 text-white shadow-lg flex items-center justify-center transition-transform hover:scale-105 ${open ? 'z-30 opacity-0 pointer-events-none' : 'z-40'}`}
         aria-label="打开 AI 对话"
       >
         <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -68,7 +68,7 @@ export default function ChatPanel() {
 
       {/* Chat panel */}
       {open && (
-        <div className="fixed bottom-24 right-6 z-40 w-80 sm:w-96 h-[28rem] bg-white dark:bg-dark-card rounded-2xl shadow-2xl border border-gray-100 dark:border-dark-border flex flex-col overflow-hidden animate-fade-in">
+        <div className="fixed bottom-24 right-6 z-50 w-80 sm:w-96 h-[28rem] bg-white dark:bg-dark-card rounded-2xl shadow-2xl border border-gray-100 dark:border-dark-border flex flex-col overflow-hidden animate-fade-in">
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-dark-border bg-gray-50/50 dark:bg-dark-surface/50">
             <div className="flex items-center gap-2">

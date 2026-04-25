@@ -2,7 +2,9 @@ package internal
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"time"
 
 	"photo-search-engine/internal/vector"
 )
@@ -14,11 +16,18 @@ type VectorIndex struct {
 
 // NewVectorIndex 创建新的向量索引
 func NewVectorIndex(indexPath string) *VectorIndex {
-	// 从环境变量获取 Milvus 配置
+	// 快速检查 Milvus 是否可达
 	milvusAddr := os.Getenv("MILVUS_ADDRESS")
 	if milvusAddr == "" {
 		milvusAddr = "localhost:19530"
 	}
+	
+	conn, err := net.DialTimeout("tcp", milvusAddr, 2*time.Second)
+	if err != nil {
+		fmt.Printf("Milvus 不可达 (%s): %v，跳过向量索引\n", milvusAddr, err)
+		return nil
+	}
+	conn.Close()
 
 	milvus, err := vector.NewMilvusIndex(milvusAddr)
 	if err != nil {

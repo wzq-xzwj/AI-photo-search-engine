@@ -94,8 +94,10 @@ func sanitizeScanPath(input string) (string, error) {
 		}
 	}
 
-	if !inWhitelist && !strings.HasPrefix(realPath, home) {
-		return "", fmt.Errorf("path not in allowed directories: %s", realPath)
+	// 允许外置存储 /Volumes（常见照片存储位置）
+	inVolumes := strings.HasPrefix(realPath, "/Volumes/")
+	if !inWhitelist && !strings.HasPrefix(realPath, home) && !inVolumes {
+		return "", fmt.Errorf("path not accessible: %s", realPath)
 	}
 
 	// 验证路径存在且是目录

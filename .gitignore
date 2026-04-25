@@ -12,10 +12,10 @@ server
 *.so
 *.dylib
 
-# Environment
+# Environment (never commit API keys!)
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # IDE
 .idea/
@@ -42,8 +42,10 @@ __pycache__/
 *.pyo
 *.egg-info/
 
-# Data files (large generated files)
+# Data files (large generated files / runtime data)
 vector_index.json
+photo_tags.json
+data/
 *.index
 *.pt
 *.pth

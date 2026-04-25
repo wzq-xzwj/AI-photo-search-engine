@@ -4,6 +4,7 @@ import Navbar from './components/Navbar'
 import ChatPanel from './components/ChatPanel'
 import Home from './pages/Home'
 import Search from './pages/Search'
+import Persons from './pages/Persons'
 
 const SELECTED_DIR_KEY = 'photo-search-selected-dir'
 
@@ -70,6 +71,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Home selectedDir={selectedDir} />} />
           <Route path="/search" element={<Search selectedDir={selectedDir} />} />
+          <Route path="/persons" element={<Persons />} />
         </Routes>
         <ChatPanel />
       </div>

@@ -169,7 +169,7 @@ async def extract_face_thumbnail(
         raise HTTPException(status_code=404, detail=f"Image not found: {image_path}")
     
     try:
-        thumbnail_bytes = detector.extract_thumbnail(
+        thumbnail_bytes = detector.extract_thumbnail_bytes(
             image_path,
             body.location.model_dump(),
             size=body.size,

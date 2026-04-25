@@ -19,6 +19,11 @@ type Config struct {
 	DBPath          string   `json:"db_path"`
 	LabelSpacePath  string   `json:"label_space_path"`
 	LogLevel        string   `json:"log_level"`
+	// LLM 配置
+	LLMProvider string `json:"llm_provider"`
+	LLMAPIKey   string `json:"llm_api_key"`
+	LLMBaseURL  string `json:"llm_base_url"`
+	LLMModel    string `json:"llm_model"`
 }
 
 var (
@@ -52,6 +57,9 @@ func load() *Config {
 		DBPath:          "data/photos.db",
 		LabelSpacePath:  "config/label_space_v1.json",
 		LogLevel:        "info",
+		LLMProvider:     "deepseek",
+		LLMBaseURL:      "https://api.deepseek.com/v1",
+		LLMModel:        "deepseek-v4-pro",
 	}
 
 	// 从配置文件加载
@@ -88,6 +96,30 @@ func load() *Config {
 	}
 	if v, err := strconv.ParseBool(os.Getenv("EXTRACT_EXIF")); err == nil {
 		cfg.ExtractEXIF = v
+	}
+	// LLM 配置
+	if v := os.Getenv("LLM_PROVIDER"); v != "" {
+		cfg.LLMProvider = v
+	}
+	if v := os.Getenv("LLM_API_KEY"); v != "" {
+		cfg.LLMAPIKey = v
+	}
+	if v := os.Getenv("LLM_BASE_URL"); v != "" {
+		cfg.LLMBaseURL = v
+	}
+	if v := os.Getenv("LLM_MODEL"); v != "" {
+		cfg.LLMModel = v
+	}
+	// DeepSeek 专用环境变量
+	if v := os.Getenv("DEEPSEEK_API_KEY"); v != "" {
+		cfg.LLMAPIKey = v
+		cfg.LLMProvider = "deepseek"
+	}
+	if v := os.Getenv("DEEPSEEK_API_URL"); v != "" {
+		cfg.LLMBaseURL = v
+	}
+	if v := os.Getenv("DEEPSEEK_MODEL"); v != "" {
+		cfg.LLMModel = v
 	}
 
 	// 确保目录存在

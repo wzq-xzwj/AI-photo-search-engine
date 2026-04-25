@@ -3,7 +3,12 @@
 提供人脸检测、特征提取、相似度计算等功能
 """
 
-import face_recognition
+try:
+    import face_recognition
+    _FACE_RECOGNITION_AVAILABLE = True
+except BaseException:
+    _FACE_RECOGNITION_AVAILABLE = False
+
 import numpy as np
 from PIL import Image
 import io
@@ -25,7 +30,80 @@ class FaceDetector:
             model: 检测模型，"hog" (CPU) 或 "cnn" (GPU)
         """
         self.model = model
+        self._available = None
         logger.info(f"FaceDetector initialized with model: {model}")
+    
+    @property
+    def available(self) -> bool:
+        """检测 face_recognition 库是否可用"""
+        if self._available is not None:
+            return self._available
+        self._available = _FACE_RECOGNITION_AVAILABLE
+        return self._available
+    
+    def detect(self, image_path: str) -> List[Dict]:
+        """
+        检测照片中的人脸 (detect_faces 的别名)
+        
+        Args:
+            image_path: 照片路径
+            
+        Returns:
+            人脸列表
+        """
+        return self.detect_faces(image_path)
+    
+    def detect_from_bytes(self, data: bytes) -> List[Dict]:
+        """
+        从字节数据检测人脸
+        
+        Args:
+            data: 图片字节数据
+            
+        Returns:
+            人脸列表，包含位置、特征向量等信息
+        """
+        try:
+            # 从字节加载图片
+            pil_image = Image.open(io.BytesIO(data))
+            # 转为 numpy 数组 (RGB)
+            image = np.array(pil_image.convert("RGB"))
+            
+            # 检测人脸位置
+            face_locations = face_recognition.face_locations(image, model=self.model)
+            
+            if not face_locations:
+                logger.info(f"No faces detected in byte data")
+                return []
+            
+            # 提取人脸特征
+            face_encodings = face_recognition.face_encodings(image, face_locations)
+            
+            faces = []
+            for i, (location, encoding) in enumerate(zip(face_locations, face_encodings)):
+                top, right, bottom, left = location
+                confidence = self._calculate_confidence(image, location)
+                
+                faces.append({
+                    "index": i,
+                    "location": {
+                        "top": top,
+                        "right": right,
+                        "bottom": bottom,
+                        "left": left,
+                        "width": right - left,
+                        "height": bottom - top
+                    },
+                    "encoding": encoding.tolist(),
+                    "confidence": confidence
+                })
+            
+            logger.info(f"Detected {len(faces)} faces from byte data")
+            return faces
+            
+        except Exception as e:
+            logger.error(f"Face detection from bytes failed: {e}")
+            return []
     
     def detect_faces(self, image_path: str) -> List[Dict]:
         """
@@ -78,6 +156,45 @@ class FaceDetector:
         except Exception as e:
             logger.error(f"Face detection failed for {image_path}: {e}")
             return []
+    
+    def extract_thumbnail_bytes(self, image_path: str, location: Dict, size: int = 150) -> bytes:
+        """
+        提取人脸缩略图，返回 JPEG 字节
+        
+        Args:
+            image_path: 照片路径
+            location: 人脸位置 {top, right, bottom, left}
+            size: 缩略图尺寸
+            
+        Returns:
+            JPEG 格式的缩略图字节数据
+        """
+        try:
+            image = Image.open(image_path)
+            top = location["top"]
+            right = location["right"]
+            bottom = location["bottom"]
+            left = location["left"]
+            
+            # 扩展人脸区域
+            margin = int((bottom - top) * 0.3)
+            top = max(0, top - margin)
+            bottom = min(image.height, bottom + margin)
+            left = max(0, left - margin)
+            right = min(image.width, right + margin)
+            
+            # 裁剪并缩放
+            face_image = image.crop((left, top, right, bottom))
+            face_image = face_image.resize((size, size), Image.Resampling.LANCZOS)
+            
+            # 转为 JPEG 字节
+            buffer = io.BytesIO()
+            face_image.save(buffer, format="JPEG", quality=85)
+            return buffer.getvalue()
+            
+        except Exception as e:
+            logger.error(f"Thumbnail extraction failed: {e}")
+            return b""
     
     def extract_thumbnail(self, image_path: str, location: Dict, size: int = 150) -> str:
         """
@@ -213,6 +330,7 @@ class FaceDetector:
 
 # 全局检测器实例
 _detector = None
+detector: FaceDetector = None  # 由 get_detector 初始化
 
 def get_detector(model: str = "hog") -> FaceDetector:
     """获取全局检测器实例"""
@@ -268,3 +386,7 @@ def compare_face_encodings(encoding1: List[float], encoding2: List[float],
     """
     detector = get_detector()
     return detector.compare_faces(encoding1, encoding2, tolerance)
+
+
+# 在模块加载时初始化全局 detector
+detector = get_detector()

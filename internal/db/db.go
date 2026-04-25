@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS photos (
     height INTEGER,
     camera_make TEXT,
     camera_model TEXT,
+    thumbnail_path TEXT,
     face_count INTEGER DEFAULT 0,
     has_faces BOOLEAN DEFAULT FALSE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,

@@ -1,0 +1,229 @@
+import { useState, useEffect, useCallback } from 'react'
+import { Link } from 'react-router-dom'
+import {
+  getPersons,
+  searchPhotosByPerson,
+  type Person,
+} from '../services/faces'
+import { useDebounce } from '../hooks/useDebounce'
+import PhotoGrid from '../components/PhotoGrid'
+
+export default function Persons() {
+  const [persons, setPersons] = useState<Person[]>([])
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const debouncedQuery = useDebounce(searchQuery, 300)
+
+  // Person detail view
+  const [selectedPerson, setSelectedPerson] = useState<Person | null>(null)
+  const [personPhotos, setPersonPhotos] = useState<any[]>([])
+  const [personPhotoTotal, setPersonPhotoTotal] = useState(0)
+  const [loadingPhotos, setLoadingPhotos] = useState(false)
+
+  const loadPersons = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const result = await getPersons(200)
+      setPersons(result.persons)
+      setTotal(result.total)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载人物列表失败')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadPersons()
+  }, [loadPersons])
+
+  const loadPersonPhotos = useCallback(async (personId: string) => {
+    setLoadingPhotos(true)
+    try {
+      const result = await searchPhotosByPerson(personId, 50)
+      setPersonPhotos(result.photos)
+      setPersonPhotoTotal(result.total)
+    } catch {
+      setPersonPhotos([])
+    } finally {
+      setLoadingPhotos(false)
+    }
+  }, [])
+
+  const handleSelectPerson = (person: Person) => {
+    setSelectedPerson(person)
+    loadPersonPhotos(person.id)
+  }
+
+  const handleBack = () => {
+    setSelectedPerson(null)
+    setPersonPhotos([])
+    setPersonPhotoTotal(0)
+  }
+
+  const filteredPersons = debouncedQuery
+    ? persons.filter((p) =>
+        p.name.toLowerCase().includes(debouncedQuery.toLowerCase())
+      )
+    : persons
+
+  // Person detail view
+  if (selectedPerson) {
+    return (
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Back button and header */}
+        <div className="flex items-center gap-4 mb-6">
+          <button
+            onClick={handleBack}
+            className="p-2 rounded-xl bg-gray-100 dark:bg-dark-surface hover:bg-gray-200 dark:hover:bg-dark-card transition-colors"
+          >
+            <svg className="w-5 h-5 text-gray-600 dark:text-dark-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+            </svg>
+          </button>
+          <div>
+            <h1 className="text-2xl font-display font-bold text-gray-900 dark:text-dark-text">
+              {selectedPerson.name}
+            </h1>
+            <p className="text-sm text-gray-500 dark:text-dark-muted">
+              {selectedPerson.face_count} 张人脸 · {personPhotoTotal} 张照片
+            </p>
+          </div>
+        </div>
+
+        {/* Photo Grid */}
+        {loadingPhotos ? (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="aspect-[4/3] rounded-xl bg-gray-200 dark:bg-dark-surface animate-pulse" />
+            ))}
+          </div>
+        ) : personPhotos.length === 0 ? (
+          <div className="text-center py-20">
+            <svg className="w-16 h-16 text-gray-300 dark:text-dark-border mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
+            </svg>
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-dark-text mb-2">暂未关联照片</h3>
+            <p className="text-sm text-gray-500 dark:text-dark-muted">标注人脸后，照片会自动关联到对应人物</p>
+          </div>
+        ) : (
+          <PhotoGrid photos={personPhotos} />
+        )}
+      </main>
+    )
+  }
+
+  // Person list
+  return (
+    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      {/* Header */}
+      <div className="mb-8">
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <h1 className="text-3xl font-display font-bold text-gray-900 dark:text-dark-text">
+              人物
+            </h1>
+            <p className="text-sm text-gray-500 dark:text-dark-muted mt-1">
+              {total > 0 ? `共 ${total} 位人物` : '标注你的人脸照片后，人物将显示在这里'}
+            </p>
+          </div>
+          {total > 0 && (
+            <button
+              onClick={loadPersons}
+              disabled={loading}
+              className="px-3 py-2 text-sm rounded-xl bg-gray-100 dark:bg-dark-surface text-gray-600 dark:text-dark-muted hover:bg-gray-200 dark:hover:bg-dark-card transition-colors flex items-center gap-1"
+            >
+              <svg className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              刷新
+            </button>
+          )}
+        </div>
+
+        {/* Search */}
+        {total > 0 && (
+          <div className="relative max-w-md">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="搜索人物..."
+              className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 dark:border-dark-border bg-white dark:bg-dark-card text-gray-900 dark:text-dark-text focus:outline-none focus:ring-2 focus:ring-primary-500"
+            />
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div className="mb-6 p-4 rounded-xl bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 text-sm">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+          {Array.from({ length: 10 }).map((_, i) => (
+            <div key={i} className="animate-pulse">
+              <div className="aspect-square rounded-2xl bg-gray-200 dark:bg-dark-surface mb-3" />
+              <div className="h-4 w-2/3 rounded bg-gray-200 dark:bg-dark-surface mx-auto" />
+            </div>
+          ))}
+        </div>
+      ) : filteredPersons.length === 0 ? (
+        <div className="text-center py-20">
+          <div className="w-20 h-20 rounded-2xl bg-gray-100 dark:bg-dark-surface flex items-center justify-center mx-auto mb-6">
+            <svg className="w-10 h-10 text-gray-400 dark:text-dark-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+            </svg>
+          </div>
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-dark-text mb-2">
+            {searchQuery ? '未找到匹配的人物' : '暂无人物'}
+          </h3>
+          <p className="text-sm text-gray-500 dark:text-dark-muted max-w-sm mx-auto">
+            {searchQuery
+              ? '尝试其他搜索词'
+              : '打开照片详情，检测人脸并标注姓名，人物将自动出现在这里'}
+          </p>
+          {!searchQuery && (
+            <Link
+              to="/"
+              className="inline-block mt-6 px-6 py-3 rounded-xl bg-primary-500 text-white text-sm font-medium hover:bg-primary-600 transition-colors"
+            >
+              返回首页
+            </Link>
+          )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+          {filteredPersons.map((person) => (
+            <button
+              key={person.id}
+              onClick={() => handleSelectPerson(person)}
+              className="group p-3 rounded-2xl bg-white dark:bg-dark-card border border-gray-100 dark:border-dark-border hover:border-primary-300 dark:hover:border-primary-600 hover:shadow-md transition-all duration-200 text-left"
+            >
+              {/* Avatar placeholder */}
+              <div className="aspect-square rounded-xl bg-gradient-to-br from-primary-400 via-accent-400 to-secondary-400 flex items-center justify-center mb-3 group-hover:scale-105 transition-transform duration-300">
+                <span className="text-3xl font-bold text-white opacity-90">
+                  {person.name.charAt(0).toUpperCase()}
+                </span>
+              </div>
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-dark-text truncate text-center">
+                {person.name}
+              </h3>
+              <p className="text-xs text-gray-500 dark:text-dark-muted text-center mt-0.5">
+                {person.photo_count} 张照片
+              </p>
+            </button>
+          ))}
+        </div>
+      )}
+    </main>
+  )
+}

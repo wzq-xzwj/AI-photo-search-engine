@@ -93,6 +93,7 @@ export default function Navbar({ darkMode, toggleDarkMode, selectedDir, onDirCha
   const handlePickFolder = async () => {
     try {
       const res = await fetch('/api/v1/system/pick-folder', { method: 'POST' })
+      if (!res.ok) return
       const data = await res.json()
       if (data.path) {
         setScanDir(data.path)
@@ -113,9 +114,14 @@ export default function Navbar({ darkMode, toggleDarkMode, selectedDir, onDirCha
     try {
       const res = await fetch(`/api/v1/files/scan?dir=${encodeURIComponent(scanDir.trim())}`, { method: 'POST' })
       const data = await res.json()
+      if (!res.ok || data.error) {
+        setScanResult(`启动扫描失败：${data.error || res.statusText}`)
+        setScanning(false)
+        return
+      }
       const scanId = data.scan_id
       if (!scanId) {
-        setScanResult('启动扫描失败')
+        setScanResult('启动扫描失败：未返回扫描ID')
         setScanning(false)
         return
       }
@@ -166,16 +172,29 @@ export default function Navbar({ darkMode, toggleDarkMode, selectedDir, onDirCha
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           {/* Logo */}
-          <Link to="/" className="flex items-center space-x-3 group">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary-500 via-accent-500 to-secondary-500 flex items-center justify-center shadow-glow-sm group-hover:shadow-glow transition-shadow duration-300">
-              <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+          <div className="flex items-center space-x-6">
+            <Link to="/" className="flex items-center space-x-3 group">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-primary-500 via-accent-500 to-secondary-500 flex items-center justify-center shadow-glow-sm group-hover:shadow-glow transition-shadow duration-300">
+                <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+              </div>
+              <span className="text-xl font-display font-bold text-gradient hidden sm:block">
+                PhotoLens AI
+              </span>
+            </Link>
+
+            {/* Nav Links */}
+            <Link
+              to="/persons"
+              className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-xl text-gray-600 dark:text-dark-muted hover:text-primary-600 dark:hover:text-primary-400 hover:bg-primary-50 dark:hover:bg-primary-500/10 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
               </svg>
-            </div>
-            <span className="text-xl font-display font-bold text-gradient hidden sm:block">
-              PhotoLens AI
-            </span>
-          </Link>
+              <span className="hidden sm:inline">人物</span>
+            </Link>
+          </div>
 
           {/* Actions */}
           <div className="flex items-center space-x-3">

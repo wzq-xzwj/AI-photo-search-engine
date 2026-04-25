@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
 
 interface Photo {
   id: string
@@ -62,7 +62,7 @@ function useLazyImage(src: string, placeholder: string) {
 }
 
 // 单个照片卡片组件 - 独立减少重渲染
-const PhotoCard = React.memo(function PhotoCard({
+const PhotoCard = memo(function PhotoCard({
   photo,
   index,
   onClick,
