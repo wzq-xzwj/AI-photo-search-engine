@@ -5,8 +5,9 @@ ml-service/venv/
 # Build outputs
 web/dist/
 web/build/
-photo-server
-server
+/photo-server
+/server
+/bin/
 *.exe
 *.dll
 *.so

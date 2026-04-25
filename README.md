@@ -151,7 +151,7 @@ npm run dev
 | ML 服务未启动 | `curl http://localhost:8000/api/v1/health` |
 | 后端未启动 | `curl http://localhost:8080/api/v1/dirs` |
 | 搜索无结果 | 检查 LLM API Key 配置是否正确 |
-| 内存不足 | 停止 Ollama 等大型服务释放内存 |
+| 内存不足 | 考虑升级硬件或关闭其他大型程序 |
 
 ## 📄 License
 

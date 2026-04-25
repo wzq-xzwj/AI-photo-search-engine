@@ -15,7 +15,7 @@ type ParsedQuery struct {
 	Tags        string   `json:"tags"`
 }
 
-// ParseNaturalLanguage 使用 LLM 解析自然语言查询（兼容 Ollama/OpenAI）
+// ParseNaturalLanguage 使用 LLM 解析自然语言查询（OpenAI 兼容协议）
 func ParseNaturalLanguage(client LLMClient, userQuery string) (*ParsedQuery, error) {
 	if client == nil {
 		return nil, fmt.Errorf("LLM client 未初始化")
