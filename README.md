@@ -20,7 +20,7 @@
 ## 🚀 一键部署
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/photo-search-engine.git
+git clone https://github.com/wzq-xzwj/AI-photo-search-engine.git
 cd photo-search-engine
 bash setup.sh
 ```
