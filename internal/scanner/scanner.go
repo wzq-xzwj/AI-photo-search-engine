@@ -293,6 +293,11 @@ func (s *Scanner) scanAsyncWithContext(ctx context.Context, task *ScanTask) {
 	default:
 	}
 
+	// 第四阶段：人脸检测
+	if s.mlClient != nil && s.db != nil && len(photos) > 0 {
+		s.detectFacesInPhotos(ctx, task, photos)
+	}
+
 	task.Status = "completed"
 	task.Message = fmt.Sprintf("扫描完成！共处理 %d 张照片", len(photos))
 	task.CurrentFile = ""
@@ -428,6 +433,75 @@ func (s *Scanner) extractFeaturesWithContext(ctx context.Context, task *ScanTask
 // extractFeaturesWithTask 带进度更新的特征提取（兼容旧接口）
 func (s *Scanner) extractFeaturesWithTask(task *ScanTask, images []string, baseDir string) {
 	s.extractFeaturesWithContext(context.Background(), task, images, baseDir)
+}
+
+// detectFacesInPhotos 批量检测人脸并保存到数据库
+func (s *Scanner) detectFacesInPhotos(ctx context.Context, task *ScanTask, photos []indexer.Photo) {
+	task.Status = "detecting_faces"
+	task.Message = "正在检测人脸..."
+	s.updateTask(task)
+
+	detected := 0
+	for i, photo := range photos {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		task.CurrentFile = photo.Name
+		s.updateTask(task)
+
+		// 跳过已检测过的照片
+		if s.db != nil {
+			existing, _ := s.db.GetFacesByPhotoID(photo.ID)
+			if len(existing) > 0 {
+				continue
+			}
+		}
+
+		result, err := s.mlClient.DetectFaces(photo.Path)
+		if err != nil {
+			continue
+		}
+
+		if result.FaceCount == 0 {
+			continue
+		}
+
+		// 保存人脸数据
+		if s.db != nil {
+			var faceRecords []db.FaceRecord
+			for _, f := range result.Faces {
+				encodingJSON, _ := json.Marshal(f.Encoding)
+				locationJSON, _ := json.Marshal(f.Location)
+				faceRecords = append(faceRecords, db.FaceRecord{
+					PhotoID:       photo.ID,
+					FaceIndex:     f.Index,
+					PersonID:      nil,
+					Location:      string(locationJSON),
+					Encoding:      string(encodingJSON),
+					Confidence:    f.Confidence,
+					ThumbnailPath: "",
+				})
+			}
+			if err := s.db.SaveFaces(photo.ID, faceRecords); err != nil {
+				fmt.Printf("  ⚠ 保存人脸数据失败 %s: %v\n", photo.Name, err)
+			} else {
+				detected++
+			}
+		}
+
+		// 每 10 张更新一次进度
+		if (i+1)%10 == 0 {
+			task.Message = fmt.Sprintf("人脸检测中... (%d/%d)", i+1, len(photos))
+			s.updateTask(task)
+		}
+	}
+
+	if detected > 0 {
+		fmt.Printf("人脸检测完成: %d 张照片检测到人脸\n", detected)
+	}
 }
 
 func (s *Scanner) classifyAndUpdateTags(batch []string, baseDir string) {

@@ -347,6 +347,64 @@ type ChatResponse struct {
 	Response string `json:"response"`
 }
 
+// FaceInfo 人脸信息
+type FaceInfo struct {
+	Index      int       `json:"index"`
+	Location   FaceLoc   `json:"location"`
+	Encoding   []float64 `json:"encoding"`
+	Confidence float64   `json:"confidence"`
+}
+
+// FaceLoc 人脸位置
+type FaceLoc struct {
+	Top    int `json:"top"`
+	Right  int `json:"right"`
+	Bottom int `json:"bottom"`
+	Left   int `json:"left"`
+}
+
+// DetectFacesResponse 人脸检测响应
+type DetectFacesResponse struct {
+	ImagePath string     `json:"image_path"`
+	FaceCount int        `json:"face_count"`
+	Faces     []FaceInfo `json:"faces"`
+}
+
+// DetectFaces 调用 ML 服务检测照片中的人脸
+func (c *MLClient) DetectFaces(imagePath string) (*DetectFacesResponse, error) {
+	type faceReq struct {
+		ImagePath string `json:"image_path"`
+	}
+	jsonData, _ := json.Marshal(faceReq{ImagePath: imagePath})
+
+	url := fmt.Sprintf("%s/api/v1/faces/detect", c.baseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("创建人脸检测请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用人脸检测失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 503 {
+		return nil, fmt.Errorf("face detection not available")
+	}
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("人脸检测返回错误 %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result DetectFacesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析人脸检测响应失败: %w", err)
+	}
+	return &result, nil
+}
+
 // Chat 调用 ML 服务的 chat API
 func (c *MLClient) Chat(message string) (string, error) {
 	reqBody := ChatRequest{SessionID: "default", Message: message}
