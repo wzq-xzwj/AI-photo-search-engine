@@ -293,15 +293,18 @@ func (s *Scanner) scanAsyncWithContext(ctx context.Context, task *ScanTask) {
 	default:
 	}
 
-	// 第四阶段：人脸检测
-	if s.mlClient != nil && s.db != nil && len(photos) > 0 {
-		s.detectFacesInPhotos(ctx, task, photos)
-	}
-
 	task.Status = "completed"
 	task.Message = fmt.Sprintf("扫描完成！共处理 %d 张照片", len(photos))
+	if task.Extracted > 0 {
+		task.Message += fmt.Sprintf("，已分类 %d 张", task.Extracted)
+	}
 	task.CurrentFile = ""
 	s.updateTask(task)
+
+	// 第四阶段：异步人脸检测（后台运行，不阻塞扫描流程）
+	if s.mlClient != nil && s.db != nil && len(photos) > 0 {
+		go s.detectFacesAsync(photos)
+	}
 }
 
 // collectFiles 收集文件（支持取消）
@@ -435,23 +438,12 @@ func (s *Scanner) extractFeaturesWithTask(task *ScanTask, images []string, baseD
 	s.extractFeaturesWithContext(context.Background(), task, images, baseDir)
 }
 
-// detectFacesInPhotos 批量检测人脸并保存到数据库
-func (s *Scanner) detectFacesInPhotos(ctx context.Context, task *ScanTask, photos []indexer.Photo) {
-	task.Status = "detecting_faces"
-	task.Message = "正在检测人脸..."
-	s.updateTask(task)
+// detectFacesAsync 异步人脸检测（后台运行，不阻塞扫描）
+func (s *Scanner) detectFacesAsync(photos []indexer.Photo) {
+	fmt.Printf("[人脸检测] 开始后台检测，共 %d 张照片\n", len(photos))
 
 	detected := 0
 	for i, photo := range photos {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		task.CurrentFile = photo.Name
-		s.updateTask(task)
-
 		// 跳过已检测过的照片
 		if s.db != nil {
 			existing, _ := s.db.GetFacesByPhotoID(photo.ID)
@@ -492,16 +484,13 @@ func (s *Scanner) detectFacesInPhotos(ctx context.Context, task *ScanTask, photo
 			}
 		}
 
-		// 每 10 张更新一次进度
+		// 每 10 张输出一次进度
 		if (i+1)%10 == 0 {
-			task.Message = fmt.Sprintf("人脸检测中... (%d/%d)", i+1, len(photos))
-			s.updateTask(task)
+			fmt.Printf("[人脸检测] 进度: %d/%d (%d 张有脸)\n", i+1, len(photos), detected)
 		}
 	}
 
-	if detected > 0 {
-		fmt.Printf("人脸检测完成: %d 张照片检测到人脸\n", detected)
-	}
+	fmt.Printf("[人脸检测] 完成: %d/%d 张照片检测到人脸\n", detected, len(photos))
 }
 
 func (s *Scanner) classifyAndUpdateTags(batch []string, baseDir string) {
