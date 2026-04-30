@@ -565,6 +565,37 @@ func (db *DB) GetFacesByPhotoID(photoID string) ([]FaceRecord, error) {
 	return faces, rows.Err()
 }
 
+// GetFacesByPersonID 获取人物的所有人脸
+func (db *DB) GetFacesByPersonID(personID string) ([]FaceRecord, error) {
+	rows, err := db.conn.Query(`
+		SELECT id, photo_id, face_index, person_id, location, encoding, confidence, thumbnail_path, created_at, updated_at
+		FROM faces WHERE person_id = ? ORDER BY id
+	`, personID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var faces []FaceRecord
+	for rows.Next() {
+		var f FaceRecord
+		var pid sql.NullString
+		var thumbPath sql.NullString
+		err := rows.Scan(&f.ID, &f.PhotoID, &f.FaceIndex, &pid, &f.Location, &f.Encoding, &f.Confidence, &thumbPath, &f.CreatedAt, &f.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		if pid.Valid {
+			f.PersonID = &pid.String
+		}
+		if thumbPath.Valid {
+			f.ThumbnailPath = thumbPath.String
+		}
+		faces = append(faces, f)
+	}
+	return faces, rows.Err()
+}
+
 // UpdateFaceThumbnailPath 更新人脸缩略图路径
 func (db *DB) UpdateFaceThumbnailPath(faceID int, path string) error {
 	_, err := db.conn.Exec(`
@@ -722,8 +753,17 @@ func (db *DB) GetClusters() (*sql.Rows, error) {
 			person_id,
 			COUNT(*) as face_count,
 			COUNT(DISTINCT photo_id) as photo_count,
-			MIN(id) as sample_face_id
-		FROM faces 
+			(
+				SELECT id FROM faces f2
+				WHERE f2.person_id = f1.person_id
+				ORDER BY (
+					CAST(json_extract(f2.location, '$.right') AS INT) - CAST(json_extract(f2.location, '$.left') AS INT)
+				) * (
+					CAST(json_extract(f2.location, '$.bottom') AS INT) - CAST(json_extract(f2.location, '$.top') AS INT)
+				) DESC
+				LIMIT 1
+			) as sample_face_id
+		FROM faces f1
 		WHERE person_id IS NOT NULL
 		GROUP BY person_id
 		ORDER BY face_count DESC

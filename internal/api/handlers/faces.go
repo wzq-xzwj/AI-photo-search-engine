@@ -543,7 +543,7 @@ func (h *FaceHandler) HandleGetClusters(c *gin.Context) {
 				ID:         face.ID,
 				PhotoID:    face.PhotoID,
 				FaceIndex:  face.FaceIndex,
-				ThumbnailURL: "/api/v1/faces/thumbnail?photo_id=" + face.PhotoID + "&index=" + strconv.Itoa(face.FaceIndex),
+				ThumbnailURL: "/api/v1/faces/thumbnail?face_id=" + strconv.Itoa(face.ID),
 			}
 		}
 
