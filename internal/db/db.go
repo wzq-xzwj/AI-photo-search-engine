@@ -520,6 +520,20 @@ func (db *DB) SaveFaces(photoID string, faces []FaceRecord) error {
 	return tx.Commit()
 }
 
+// GetTotalFacesCount 获取人脸总数
+func (db *DB) GetTotalFacesCount() (int, error) {
+	var count int
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM faces").Scan(&count)
+	return count, err
+}
+
+// GetTotalPersonsCount 获取人物总数（有 person_id 的不同数量）
+func (db *DB) GetTotalPersonsCount() (int, error) {
+	var count int
+	err := db.conn.QueryRow("SELECT COUNT(DISTINCT person_id) FROM faces WHERE person_id IS NOT NULL").Scan(&count)
+	return count, err
+}
+
 // GetFacesByPhotoID 获取照片的人脸列表
 func (db *DB) GetFacesByPhotoID(photoID string) ([]FaceRecord, error) {
 	rows, err := db.conn.Query(`
@@ -535,31 +549,46 @@ func (db *DB) GetFacesByPhotoID(photoID string) ([]FaceRecord, error) {
 	for rows.Next() {
 		var f FaceRecord
 		var personID sql.NullString
-		err := rows.Scan(&f.ID, &f.PhotoID, &f.FaceIndex, &personID, &f.Location, &f.Encoding, &f.Confidence, &f.ThumbnailPath, &f.CreatedAt, &f.UpdatedAt)
+		var thumbPath sql.NullString
+		err := rows.Scan(&f.ID, &f.PhotoID, &f.FaceIndex, &personID, &f.Location, &f.Encoding, &f.Confidence, &thumbPath, &f.CreatedAt, &f.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
 		if personID.Valid {
 			f.PersonID = &personID.String
 		}
+		if thumbPath.Valid {
+			f.ThumbnailPath = thumbPath.String
+		}
 		faces = append(faces, f)
 	}
 	return faces, rows.Err()
 }
 
-// GetFaceByID 获取单个人脸详情
+// UpdateFaceThumbnailPath 更新人脸缩略图路径
+func (db *DB) UpdateFaceThumbnailPath(faceID int, path string) error {
+	_, err := db.conn.Exec(`
+		UPDATE faces SET thumbnail_path = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, path, faceID)
+	return err
+}
 func (db *DB) GetFaceByID(faceID int) (*FaceRecord, error) {
 	var f FaceRecord
 	var personID sql.NullString
+	var thumbPath sql.NullString
 	err := db.conn.QueryRow(`
 		SELECT id, photo_id, face_index, person_id, location, encoding, confidence, thumbnail_path, created_at, updated_at
 		FROM faces WHERE id = ?
-	`, faceID).Scan(&f.ID, &f.PhotoID, &f.FaceIndex, &personID, &f.Location, &f.Encoding, &f.Confidence, &f.ThumbnailPath, &f.CreatedAt, &f.UpdatedAt)
+	`, faceID).Scan(&f.ID, &f.PhotoID, &f.FaceIndex, &personID, &f.Location, &f.Encoding, &f.Confidence, &thumbPath, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	if personID.Valid {
 		f.PersonID = &personID.String
+	}
+	if thumbPath.Valid {
+		f.ThumbnailPath = thumbPath.String
 	}
 	return &f, nil
 }
@@ -635,7 +664,14 @@ func (db *DB) UpdatePersonStats(personID string) error {
 	return err
 }
 
-// SearchPhotosByPerson 按人物搜索照片
+// UpdatePersonName 更新人物名称
+func (db *DB) UpdatePersonName(personID, name string) error {
+	_, err := db.conn.Exec(`
+		UPDATE persons SET name = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, name, personID)
+	return err
+}
 func (db *DB) SearchPhotosByPerson(personID string, limit, offset int) ([]indexer.Photo, int, error) {
 	var total int
 	err := db.conn.QueryRow(`
@@ -677,6 +713,21 @@ func (db *DB) SearchPhotosByPerson(personID string, limit, offset int) ([]indexe
 	}
 
 	return photos, total, rows.Err()
+}
+
+// GetClusters 获取聚类后的人物列表
+func (db *DB) GetClusters() (*sql.Rows, error) {
+	return db.conn.Query(`
+		SELECT 
+			person_id,
+			COUNT(*) as face_count,
+			COUNT(DISTINCT photo_id) as photo_count,
+			MIN(id) as sample_face_id
+		FROM faces 
+		WHERE person_id IS NOT NULL
+		GROUP BY person_id
+		ORDER BY face_count DESC
+	`)
 }
 
 // GetPhotoPathByID 通过ID获取照片路径

@@ -146,8 +146,10 @@ func (vi *VectorIndex) Clear() {
 
 // HasImage 检查图片是否已在索引中
 func (vi *VectorIndex) HasImage(path string) bool {
-	// 需要从 SQLite 查询
-	return false
+	if vi == nil || vi.milvus == nil {
+		return false
+	}
+	return vi.milvus.HasPhoto(path)
 }
 
 // Close 关闭连接

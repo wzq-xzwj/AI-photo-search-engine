@@ -58,14 +58,10 @@ func (m *MilvusIndex) createCollection() error {
 		WithName(CollectionName).
 		WithDescription("照片搜索向量").
 		WithField(entity.NewField().
-			WithName("id").
-			WithDataType(entity.FieldTypeInt64).
-			WithIsPrimaryKey(true).
-			WithIsAutoID(true)).
-		WithField(entity.NewField().
 			WithName("photo_id").
 			WithDataType(entity.FieldTypeVarChar).
-			WithMaxLength(256)).
+			WithMaxLength(256).
+			WithIsPrimaryKey(true)).
 		WithField(entity.NewField().
 			WithName("file_path").
 			WithDataType(entity.FieldTypeVarChar).
@@ -97,13 +93,13 @@ func (m *MilvusIndex) createCollection() error {
 	return nil
 }
 
-// AddPhoto 添加照片向量
+// AddPhoto 添加照片向量（使用 Upsert 避免重复）
 func (m *MilvusIndex) AddPhoto(photoID, filePath string, vector []float32) error {
 	photoIDColumn := entity.NewColumnVarChar("photo_id", []string{photoID})
 	pathColumn := entity.NewColumnVarChar("file_path", []string{filePath})
 	vectorColumn := entity.NewColumnFloatVector("vector", Dim, [][]float32{vector})
 
-	_, err := m.client.Insert(m.ctx, CollectionName, "", photoIDColumn, pathColumn, vectorColumn)
+	_, err := m.client.Upsert(m.ctx, CollectionName, "", photoIDColumn, pathColumn, vectorColumn)
 	if err != nil {
 		return fmt.Errorf("插入向量失败: %w", err)
 	}
@@ -111,7 +107,7 @@ func (m *MilvusIndex) AddPhoto(photoID, filePath string, vector []float32) error
 	return nil
 }
 
-// AddPhotosBatch 批量添加照片向量
+// AddPhotosBatch 批量添加照片向量（使用 Upsert 避免重复）
 func (m *MilvusIndex) AddPhotosBatch(photoIDs, filePaths []string, vectors [][]float32) error {
 	if len(photoIDs) != len(filePaths) || len(photoIDs) != len(vectors) {
 		return fmt.Errorf("参数长度不匹配")
@@ -121,7 +117,7 @@ func (m *MilvusIndex) AddPhotosBatch(photoIDs, filePaths []string, vectors [][]f
 	pathColumn := entity.NewColumnVarChar("file_path", filePaths)
 	vectorColumn := entity.NewColumnFloatVector("vector", Dim, vectors)
 
-	_, err := m.client.Insert(m.ctx, CollectionName, "", photoIDColumn, pathColumn, vectorColumn)
+	_, err := m.client.Upsert(m.ctx, CollectionName, "", photoIDColumn, pathColumn, vectorColumn)
 	if err != nil {
 		return fmt.Errorf("批量插入失败: %w", err)
 	}
@@ -202,6 +198,21 @@ func (m *MilvusIndex) GetStats() (int64, error) {
 	}
 
 	return rowCount, nil
+}
+
+// HasPhoto 检查照片是否已在 Milvus 中
+func (m *MilvusIndex) HasPhoto(filePath string) bool {
+	expr := fmt.Sprintf("file_path == \"%s\"", filePath)
+	results, err := m.client.Query(m.ctx, CollectionName, []string{}, expr, []string{"photo_id"})
+	if err != nil {
+		return false
+	}
+	return len(results) > 0 && results[0].Len() > 0
+}
+
+// Flush 刷新数据
+func (m *MilvusIndex) Flush() error {
+	return m.client.Flush(m.ctx, CollectionName, false)
 }
 
 // DropCollection 删除集合（危险操作）

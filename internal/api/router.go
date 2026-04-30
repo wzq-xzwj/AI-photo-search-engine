@@ -58,6 +58,9 @@ func (r *Router) Setup() *gin.Engine {
 			api.GET("/persons", faceHandler.HandleGetPersons)
 			api.GET("/search/person", faceHandler.HandleSearchByPerson)
 			api.GET("/faces/thumbnail", faceHandler.HandleGetFaceThumbnail)
+			api.GET("/faces/stats", faceHandler.HandleGetFaceStats)
+			api.GET("/faces/clusters", faceHandler.HandleGetClusters)
+			api.POST("/faces/label-cluster", faceHandler.HandleLabelCluster)
 		}
 	}
 

@@ -71,6 +71,11 @@ export function getFaceThumbnailUrl(photoId: string, faceIndex: number): string 
   return `${API_BASE}/faces/thumbnail?photo_id=${encodeURIComponent(photoId)}&index=${faceIndex}`
 }
 
+/** 通过 face_id 获取人脸缩略图 URL */
+export function getFaceThumbnailUrlByID(faceId: number): string {
+  return `${API_BASE}/faces/thumbnail?face_id=${faceId}`
+}
+
 /** 标注人脸 */
 export async function labelFace(
   faceId: number,

@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"photo-search-engine/internal/db"
@@ -301,40 +305,308 @@ func (h *FaceHandler) HandleSearchByPerson(c *gin.Context) {
 	})
 }
 
-// HandleGetFaceThumbnail 获取人脸缩略图
+// HandleGetFaceThumbnail 获取人脸缩略图（从原图实时裁剪）
 func (h *FaceHandler) HandleGetFaceThumbnail(c *gin.Context) {
-	photoID := c.Query("photo_id")
-	indexStr := c.Query("index")
-	if photoID == "" || indexStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "photo_id and index required"})
-		return
+	// 优先用 face_id
+	faceIDStr := c.Query("face_id")
+	var face *db.FaceRecord
+
+	if faceIDStr != "" {
+		fid, err := strconv.Atoi(faceIDStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid face_id"})
+			return
+		}
+		face, err = h.db.GetFaceByID(fid)
+		if err != nil {
+			h.logger.Error("GetFaceByID failed", zap.Error(err), zap.Int("face_id", fid))
+			c.JSON(http.StatusNotFound, gin.H{"error": "Face not found", "detail": err.Error()})
+			return
+		}
+		if face == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Face is nil"})
+			return
+		}
+	} else {
+		// 兼容旧接口 photo_id + index
+		photoID := c.Query("photo_id")
+		indexStr := c.Query("index")
+		if photoID == "" || indexStr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "face_id or photo_id+index required"})
+			return
+		}
+		index, _ := strconv.Atoi(indexStr)
+		faces, err := h.db.GetFacesByPhotoID(photoID)
+		if err != nil || len(faces) <= index {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Face not found"})
+			return
+		}
+		face = &faces[index]
 	}
 
-	index, _ := strconv.Atoi(indexStr)
-
-	// 从数据库获取缩略图路径
-	faces, err := h.db.GetFacesByPhotoID(photoID)
-	if err != nil || len(faces) <= index {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Face not found"})
-		return
+	// 如果有预存缩略图，直接返回
+	if face.ThumbnailPath != "" {
+		if data, err := os.ReadFile(face.ThumbnailPath); err == nil {
+			c.Data(http.StatusOK, "image/jpeg", data)
+			return
+		}
 	}
 
-	face := faces[index]
-	if face.ThumbnailPath == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Thumbnail not found"})
-		return
+	// 否则从原图裁剪
+	// photo_id 在 faces 表中实际是文件路径
+	photoPath := face.PhotoID
+	if _, err := os.Stat(photoPath); os.IsNotExist(err) {
+		// 尝试从 photos 表查找
+		photoPath, err = h.db.GetPhotoPathByID(face.PhotoID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Photo not found"})
+			return
+		}
 	}
 
-	data, err := os.ReadFile(face.ThumbnailPath)
+	// 解析人脸位置
+	var loc struct {
+		Top    int `json:"top"`
+		Right  int `json:"right"`
+		Bottom int `json:"bottom"`
+		Left   int `json:"left"`
+	}
+	if face.Location != "" {
+		json.Unmarshal([]byte(face.Location), &loc)
+	}
+
+	// 打开原图
+	f, err := os.Open(photoPath)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Thumbnail file not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Photo file not found"})
+		return
+	}
+	defer f.Close()
+
+	var img image.Image
+	ext := strings.ToLower(filepath.Ext(photoPath))
+	if ext == ".png" {
+		img, err = png.Decode(f)
+	} else {
+		img, err = jpeg.Decode(f)
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decode image"})
 		return
 	}
 
-	c.Data(http.StatusOK, "image/jpeg", data)
+	bounds := img.Bounds()
+	imgW := bounds.Max.X
+	imgH := bounds.Max.Y
+
+	// 添加 padding（20%）
+	faceW := loc.Right - loc.Left
+	faceH := loc.Bottom - loc.Top
+	if faceW <= 0 {
+		faceW = 100
+	}
+	if faceH <= 0 {
+		faceH = 100
+	}
+	padX := faceW / 5
+	padY := faceH / 5
+
+	x0 := max(0, loc.Left-padX)
+	y0 := max(0, loc.Top-padY)
+	x1 := min(imgW, loc.Right+padX)
+	y1 := min(imgH, loc.Bottom+padY)
+
+	// 裁剪
+	cropper, ok := img.(interface {
+		SubImage(r image.Rectangle) image.Image
+	})
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Image cropping not supported"})
+		return
+	}
+	cropped := cropper.SubImage(image.Rect(x0, y0, x1, y1))
+
+	// 编码为 JPEG
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, cropped, &jpeg.Options{Quality: 85}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encode thumbnail"})
+		return
+	}
+
+	// 缓存到磁盘
+	thumbDir := "./data/faces"
+	os.MkdirAll(thumbDir, 0755)
+	thumbPath := filepath.Join(thumbDir, fmt.Sprintf("%d.jpg", face.ID))
+	os.WriteFile(thumbPath, buf.Bytes(), 0644)
+
+	// 更新数据库
+	h.db.UpdateFaceThumbnailPath(face.ID, thumbPath)
+
+	c.Data(http.StatusOK, "image/jpeg", buf.Bytes())
 }
 
-// ---- ML Face Client Methods ----
+// HandleGetFaceStats 获取人脸统计
+func (h *FaceHandler) HandleGetFaceStats(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not available"})
+		return
+	}
+
+	totalFaces, err := h.db.GetTotalFacesCount()
+	if err != nil {
+		h.logger.Error("Failed to get faces count", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get stats"})
+		return
+	}
+
+	totalPersons, err := h.db.GetTotalPersonsCount()
+	if err != nil {
+		h.logger.Error("Failed to get persons count", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get stats"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": gin.H{
+			"total_faces":   totalFaces,
+			"total_persons": totalPersons,
+		},
+	})
+}
+
+// HandleGetClusters 获取聚类后的人物列表
+func (h *FaceHandler) HandleGetClusters(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not available"})
+		return
+	}
+
+	// 查询聚类结果
+	rows, err := h.db.GetClusters()
+	if err != nil {
+		h.logger.Error("Failed to get clusters", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get clusters"})
+		return
+	}
+	defer rows.Close()
+
+	type ClusterInfo struct {
+		PersonID   string `json:"person_id"`
+		FaceCount  int    `json:"face_count"`
+		PhotoCount int    `json:"photo_count"`
+		SampleFace *struct {
+			ID         int    `json:"id"`
+			PhotoID    string `json:"photo_id"`
+			FaceIndex  int    `json:"face_index"`
+			ThumbnailURL string `json:"thumbnail_url"`
+		} `json:"sample_face,omitempty"`
+		Name string `json:"name"`
+	}
+
+	// 先收集所有行数据
+	type clusterRow struct {
+		PersonID     string
+		FaceCount    int
+		PhotoCount   int
+		SampleFaceID int
+	}
+	var rows2 []clusterRow
+	for rows.Next() {
+		var r clusterRow
+		if err := rows.Scan(&r.PersonID, &r.FaceCount, &r.PhotoCount, &r.SampleFaceID); err != nil {
+			continue
+		}
+		rows2 = append(rows2, r)
+	}
+	rows.Close()
+
+	// 再查每行的样本人脸和人物名称
+	var clusters []ClusterInfo
+	for _, r := range rows2 {
+		cluster := ClusterInfo{
+			PersonID:   r.PersonID,
+			FaceCount:  r.FaceCount,
+			PhotoCount: r.PhotoCount,
+			Name:       "未知人物",
+		}
+
+		face, err := h.db.GetFaceByID(r.SampleFaceID)
+		if err == nil && face != nil {
+			cluster.SampleFace = &struct {
+				ID           int    `json:"id"`
+				PhotoID      string `json:"photo_id"`
+				FaceIndex    int    `json:"face_index"`
+				ThumbnailURL string `json:"thumbnail_url"`
+			}{
+				ID:         face.ID,
+				PhotoID:    face.PhotoID,
+				FaceIndex:  face.FaceIndex,
+				ThumbnailURL: "/api/v1/faces/thumbnail?photo_id=" + face.PhotoID + "&index=" + strconv.Itoa(face.FaceIndex),
+			}
+		}
+
+		person, _ := h.db.GetPersonByID(r.PersonID)
+		if person != nil && person.Name != "" {
+			cluster.Name = person.Name
+		}
+
+		clusters = append(clusters, cluster)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": gin.H{
+			"clusters": clusters,
+			"total":    len(clusters),
+		},
+	})
+}
+
+// HandleLabelCluster 标注整个人物聚类
+func (h *FaceHandler) HandleLabelCluster(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not available"})
+		return
+	}
+
+	var req struct {
+		PersonID   string `json:"person_id" binding:"required"`
+		PersonName string `json:"person_name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	// 创建或更新人物
+	person, err := h.db.GetPersonByID(req.PersonID)
+	if err != nil || person == nil {
+		// 创建新人物
+		person = &db.Person{
+			ID:   req.PersonID,
+			Name: req.PersonName,
+		}
+		if err := h.db.CreatePerson(person); err != nil {
+			h.logger.Error("Failed to create person", zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create person"})
+			return
+		}
+	} else {
+		// 更新名称
+		if err := h.db.UpdatePersonName(req.PersonID, req.PersonName); err != nil {
+			h.logger.Error("Failed to update person name", zap.Error(err))
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": gin.H{
+			"person_id":   req.PersonID,
+			"person_name": req.PersonName,
+		},
+	})
+}
 
 // MLFaceInfo ML服务返回的人脸信息
 type MLFaceInfo struct {

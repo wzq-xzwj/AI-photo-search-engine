@@ -104,8 +104,6 @@ const PhotoCard = memo(function PhotoCard({
   )
 })
 
-import React from 'react'
-
 export default function PhotoGrid({
   photos: propPhotos,
   loading: propLoading = false,

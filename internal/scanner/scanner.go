@@ -298,12 +298,20 @@ func (s *Scanner) scanAsyncWithContext(ctx context.Context, task *ScanTask) {
 	if task.Extracted > 0 {
 		task.Message += fmt.Sprintf("，已分类 %d 张", task.Extracted)
 	}
+	if task.Failed > 0 {
+		task.Message += fmt.Sprintf("，失败 %d 张", task.Failed)
+	}
+	task.Message += "，人脸检测后台运行中..."
 	task.CurrentFile = ""
 	s.updateTask(task)
 
 	// 第四阶段：异步人脸检测（后台运行，不阻塞扫描流程）
+	// 使用 goroutine 确保完全异步，即使检测耗时也不会影响前端响应
 	if s.mlClient != nil && s.db != nil && len(photos) > 0 {
-		go s.detectFacesAsync(photos)
+		go func() {
+			fmt.Printf("[人脸检测] 启动后台 goroutine，共 %d 张照片\n", len(photos))
+			s.detectFacesAsync(photos)
+		}()
 	}
 }
 
@@ -439,21 +447,28 @@ func (s *Scanner) extractFeaturesWithTask(task *ScanTask, images []string, baseD
 }
 
 // detectFacesAsync 异步人脸检测（后台运行，不阻塞扫描）
+// 注意：此方法应在 goroutine 中调用，避免阻塞主流程
 func (s *Scanner) detectFacesAsync(photos []indexer.Photo) {
 	fmt.Printf("[人脸检测] 开始后台检测，共 %d 张照片\n", len(photos))
 
 	detected := 0
+	skipped := 0
+	failed := 0
+
 	for i, photo := range photos {
 		// 跳过已检测过的照片
 		if s.db != nil {
 			existing, _ := s.db.GetFacesByPhotoID(photo.ID)
 			if len(existing) > 0 {
+				skipped++
 				continue
 			}
 		}
 
 		result, err := s.mlClient.DetectFaces(photo.Path)
 		if err != nil {
+			fmt.Printf("  ⚠ 人脸检测失败 %s: %v\n", photo.Name, err)
+			failed++
 			continue
 		}
 
@@ -479,6 +494,7 @@ func (s *Scanner) detectFacesAsync(photos []indexer.Photo) {
 			}
 			if err := s.db.SaveFaces(photo.ID, faceRecords); err != nil {
 				fmt.Printf("  ⚠ 保存人脸数据失败 %s: %v\n", photo.Name, err)
+				failed++
 			} else {
 				detected++
 			}
@@ -486,11 +502,13 @@ func (s *Scanner) detectFacesAsync(photos []indexer.Photo) {
 
 		// 每 10 张输出一次进度
 		if (i+1)%10 == 0 {
-			fmt.Printf("[人脸检测] 进度: %d/%d (%d 张有脸)\n", i+1, len(photos), detected)
+			fmt.Printf("[人脸检测] 进度: %d/%d (检测到 %d 张有脸, 跳过 %d, 失败 %d)\n", 
+				i+1, len(photos), detected, skipped, failed)
 		}
 	}
 
-	fmt.Printf("[人脸检测] 完成: %d/%d 张照片检测到人脸\n", detected, len(photos))
+	fmt.Printf("[人脸检测] 完成: %d/%d 张照片检测到人脸 (跳过 %d, 失败 %d)\n", 
+		detected, len(photos), skipped, failed)
 }
 
 func (s *Scanner) classifyAndUpdateTags(batch []string, baseDir string) {

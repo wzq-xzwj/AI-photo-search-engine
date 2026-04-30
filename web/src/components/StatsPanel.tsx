@@ -5,6 +5,8 @@ interface Stats {
   total_photos: number
   total_size: number
   total_tags: number
+  total_faces?: number
+  total_persons?: number
   tag_breakdown?: Record<string, number>
 }
 
@@ -26,6 +28,25 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [showTagsModal, setShowTagsModal] = useState(false)
+  const [faceStats, setFaceStats] = useState({ total_faces: 0, total_persons: 0 })
+
+  useEffect(() => {
+    // 获取人脸统计
+    fetch('/api/v1/faces/stats')
+      .then(res => {
+        if (!res.ok) throw new Error('faces stats failed')
+        return res.json()
+      })
+      .then(data => {
+        setFaceStats({
+          total_faces: data.total_faces || 0,
+          total_persons: data.total_persons || 0
+        })
+      })
+      .catch(() => {
+        // 静默失败，不影响主统计
+      })
+  }, [])
 
   useEffect(() => {
     setLoading(true)
@@ -59,8 +80,8 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
 
   if (loading) {
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        {Array.from({ length: 3 }).map((_, i) => (
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {Array.from({ length: 4 }).map((_, i) => (
           <div key={i} className="card dark:card-dark p-4 animate-pulse">
             <div className="w-10 h-10 rounded-xl bg-gray-200 dark:bg-dark-surface mb-3" />
             <div className="h-7 w-16 bg-gray-200 dark:bg-dark-surface rounded mb-1" />
@@ -116,6 +137,19 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
       color: 'from-emerald-500 to-emerald-600',
       clickable: true,
     },
+    {
+      label: '发现人物',
+      value: faceStats.total_persons > 0 ? `${faceStats.total_persons}人` : '0',
+      subValue: faceStats.total_faces > 0 ? `${faceStats.total_faces}张人脸` : undefined,
+      icon: (
+        <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.592-2.641m-5.807 2.641l-.001.109M6.375 16.813c0-1.113.285-2.16.786-3.07m0 0a6.375 6.375 0 0111.592-2.641m-5.807 2.641l-.001.109M12 12a3 3 0 11-6 0 3 3 0 016 0zm6 0a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+      ),
+      color: 'from-rose-500 to-rose-600',
+      clickable: true,
+      onClick: () => navigate('/persons'),
+    },
   ]
 
   const handleTagClick = (tag: string) => {
@@ -125,11 +159,17 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
 
   return (
     <>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {cards.map((card) => (
           <div
             key={card.label}
-            onClick={() => card.clickable && setShowTagsModal(true)}
+            onClick={() => {
+              if (card.onClick) {
+                card.onClick()
+              } else if (card.clickable) {
+                setShowTagsModal(true)
+              }
+            }}
             className={`card dark:card-dark p-4 hover:shadow-lg transition-all duration-300 ${
               card.clickable ? 'cursor-pointer hover:scale-[1.02]' : ''
             }`}
@@ -138,9 +178,15 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
               {card.icon}
             </div>
             <p className="text-2xl font-bold text-gray-900 dark:text-dark-text">{card.value}</p>
+            {card.subValue && (
+              <p className="text-xs text-gray-500 dark:text-dark-muted mt-0.5">{card.subValue}</p>
+            )}
             <p className="text-sm text-gray-500 dark:text-dark-muted mt-0.5">{card.label}</p>
-            {card.clickable && (
+            {card.clickable && !card.onClick && (
               <p className="text-xs text-emerald-600 dark:text-emerald-400 mt-2 font-medium">点击查看标签词云 →</p>
+            )}
+            {card.onClick && (
+              <p className="text-xs text-rose-600 dark:text-rose-400 mt-2 font-medium">点击查看人物相册 →</p>
             )}
           </div>
         ))}
