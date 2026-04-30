@@ -37,11 +37,7 @@ function App() {
     return false
   })
 
-  const [selectedDir, setSelectedDir] = useState<string>(() => {
-    try {
-      return localStorage.getItem(SELECTED_DIR_KEY) || ''
-    } catch { return '' }
-  })
+  const [selectedDir, setSelectedDir] = useState<string>('')
 
   useEffect(() => {
     if (darkMode) {
@@ -50,6 +46,20 @@ function App() {
       document.documentElement.classList.remove('dark')
     }
   }, [darkMode])
+
+  // 验证并恢复上次选择的目录
+  useEffect(() => {
+    fetch('/api/v1/dirs')
+      .then(res => res.json())
+      .then(data => {
+        const dirs = data.dirs || []
+        const savedDir = localStorage.getItem(SELECTED_DIR_KEY)
+        if (savedDir && dirs.includes(savedDir)) {
+          setSelectedDir(savedDir)
+        }
+      })
+      .catch(() => {})
+  }, [])
 
   const handleDirChange = (dir: string) => {
     setSelectedDir(dir)
