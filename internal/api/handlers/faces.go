@@ -353,13 +353,14 @@ func (h *FaceHandler) HandleGetFaceThumbnail(c *gin.Context) {
 	}
 
 	// 否则从原图裁剪
-	// photo_id 在 faces 表中实际是文件路径
+	// photo_id 在 faces 表中可能是文件路径或 "photo-XX" 格式 ID
 	photoPath := face.PhotoID
 	if _, err := os.Stat(photoPath); os.IsNotExist(err) {
 		// 尝试从 photos 表查找
-		photoPath, err = h.db.GetPhotoPathByID(face.PhotoID)
-		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Photo not found"})
+		var lookupErr error
+		photoPath, lookupErr = h.db.GetPhotoPathByID(face.PhotoID)
+		if lookupErr != nil || photoPath == "" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Photo not found", "photo_id": face.PhotoID})
 			return
 		}
 	}
