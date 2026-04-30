@@ -682,9 +682,9 @@ func (db *DB) SearchPhotosByPerson(personID string, limit, offset int) ([]indexe
 	}
 
 	rows, err := db.conn.Query(`
-		SELECT DISTINCT p.id, p.path, p.name, p.date_time, p.width, p.height, p.camera_make, p.camera_model
+		SELECT DISTINCT p.id, p.path, COALESCE(p.name, ''), COALESCE(p.date_time, ''), COALESCE(p.width, 0), COALESCE(p.height, 0), COALESCE(p.camera_make, ''), COALESCE(p.camera_model, '')
 		FROM photos p
-		JOIN faces f ON p.id = f.photo_id
+		JOIN faces f ON (p.id = f.photo_id OR p.path = f.photo_id)
 		WHERE f.person_id = ?
 		ORDER BY p.date_time DESC
 		LIMIT ? OFFSET ?
