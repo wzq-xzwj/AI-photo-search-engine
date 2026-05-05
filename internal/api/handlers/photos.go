@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"photo-search-engine/internal"
+	"photo-search-engine/internal/db"
 	"photo-search-engine/internal/indexer"
 
 	"github.com/gin-gonic/gin"
@@ -16,45 +17,45 @@ import (
 	"os"
 )
 
-var similarityLabels = loadSimilarityLabels()
+var similarityLabels = loadLabelsV2()
 
-func loadSimilarityLabels() []string {
-	path := "config/label_space_v1.json"
+func loadLabelsV2() []string {
+	v2Path := "config/label_space_v2.json"
 	if envPath := os.Getenv("LABEL_SPACE_PATH"); envPath != "" {
-		path = envPath
+		v2Path = envPath
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return []string{
-			"城市街景", "古建筑", "现代建筑", "公园园林", "海滨沙滩",
-			"山川湖泊", "室内场景", "夜景灯光", "人物合影", "美食餐饮",
+	if data, err := os.ReadFile(v2Path); err == nil {
+		var spaceV2 struct {
+			Categories map[string][]string `json:"categories"`
+		}
+		if json.Unmarshal(data, &spaceV2) == nil {
+			var flat []string
+			for _, labels := range spaceV2.Categories {
+				flat = append(flat, labels...)
+			}
+			if len(flat) > 0 {
+				return flat
+			}
 		}
 	}
-	var space struct {
-		Flat []string `json:"flat"`
-	}
-	if err := json.Unmarshal(data, &space); err != nil {
-		return []string{"城市街景", "古建筑", "室内场景", "人物合影", "美食餐饮"}
-	}
-	if len(space.Flat) == 0 {
-		return []string{"城市街景", "古建筑", "室内场景", "人物合影", "美食餐饮"}
-	}
-	return space.Flat
+	// fallback
+	return []string{"自然风光", "人物合影", "城市街景", "古建筑", "美食餐饮", "花卉"}
 }
 
 type PhotosHandler struct {
 	indexer  *indexer.Index
 	mlClient *internal.MLClient
+	db       *db.DB
 	logger   *zap.Logger
 }
 
-func NewPhotosHandler(idx *indexer.Index, mlClient *internal.MLClient, logger *zap.Logger) *PhotosHandler {
-	return &PhotosHandler{indexer: idx, mlClient: mlClient, logger: logger}
+func NewPhotosHandler(idx *indexer.Index, mlClient *internal.MLClient, database *db.DB, logger *zap.Logger) *PhotosHandler {
+	return &PhotosHandler{indexer: idx, mlClient: mlClient, db: database, logger: logger}
 }
 
 func (h *PhotosHandler) HandleList(c *gin.Context) {
 	pageStr := c.DefaultQuery("page", "1")
-	pageSizeStr := c.DefaultQuery("page_size", "20")
+	pageSizeStr := c.DefaultQuery("page_size", "40")
 	dir := c.Query("dir")
 
 	page, _ := strconv.Atoi(pageStr)
@@ -139,19 +140,21 @@ func (h *PhotosHandler) HandleClassifyAll(c *gin.Context) {
 				end = len(paths)
 			}
 			batch := paths[i:end]
-			results, err := h.mlClient.SimilarityBatch(batch, similarityLabels, 3)
+				// 使用 V2 分类器（Prompt模板 + 阈值过滤），失败时回退 V1
+			results, err := h.mlClient.SimilarityBatchV2(batch, similarityLabels, 10, 0.25)
 			if err != nil {
-				h.logger.Warn("ClassifyBatch failed", zap.Error(err), zap.Int("batch", i/batchSize))
-				continue
+				h.logger.Warn("V2 分类失败，回退 V1", zap.Error(err))
+				results, err = h.mlClient.SimilarityBatch(batch, similarityLabels, 3)
+				if err != nil {
+					h.logger.Warn("ClassifyBatch failed", zap.Error(err), zap.Int("batch", i/batchSize))
+					continue
+				}
 			}
 			updates := make(map[string][]string)
 			for j, result := range results {
 				path := batch[j]
-				mlTags := make([]string, 0, 3)
-				for idx, item := range result {
-					if idx >= 3 {
-						break
-					}
+				mlTags := make([]string, 0, len(result))
+				for _, item := range result {
 					mlTags = append(mlTags, item.Label)
 				}
 				// 与现有标签合并（保留文件夹标签，去重）
@@ -173,6 +176,18 @@ func (h *PhotosHandler) HandleClassifyAll(c *gin.Context) {
 				updates[path] = merged
 			}
 			h.indexer.BatchUpdateTagsByPaths(updates)
+			// 同步保存到数据库
+			if h.db != nil {
+				for path, tags := range updates {
+					photos := h.indexer.ListAllPhotos()
+					for _, p := range photos {
+						if p.Path == path {
+							h.db.UpdatePhotoTags(p.ID, tags)
+							break
+						}
+					}
+				}
+			}
 			h.logger.Info("ClassifyBatch completed", zap.Int("batch", i/batchSize), zap.Int("count", len(batch)))
 		}
 	}(allPaths, existingTagsMap)

@@ -38,9 +38,10 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
         return res.json()
       })
       .then(data => {
+        const stats = data.data || data
         setFaceStats({
-          total_faces: data.total_faces || 0,
-          total_persons: data.total_persons || 0
+          total_faces: stats.total_faces || 0,
+          total_persons: stats.total_persons || 0
         })
       })
       .catch(() => {
@@ -111,7 +112,7 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
           <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z" />
         </svg>
       ),
-      color: 'from-primary-500 to-primary-600',
+      color: 'from-purple-500 to-purple-600',
       clickable: false,
     },
     {
@@ -122,7 +123,7 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
           <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z" />
         </svg>
       ),
-      color: 'from-accent-500 to-accent-600',
+      color: 'from-violet-500 to-violet-600',
       clickable: false,
     },
     {
@@ -134,7 +135,7 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
           <path strokeLinecap="round" strokeLinejoin="round" d="M6 6h.008v.008H6V6z" />
         </svg>
       ),
-      color: 'from-emerald-500 to-emerald-600',
+      color: 'from-emerald-500 to-teal-600',
       clickable: true,
     },
     {
@@ -146,7 +147,7 @@ export default function StatsPanel({ selectedDir }: StatsPanelProps) {
           <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 9.337 9.337 0 004.121-.952 4.125 4.125 0 00-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 018.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0111.592-2.641m-5.807 2.641l-.001.109M6.375 16.813c0-1.113.285-2.16.786-3.07m0 0a6.375 6.375 0 0111.592-2.641m-5.807 2.641l-.001.109M12 12a3 3 0 11-6 0 3 3 0 016 0zm6 0a3 3 0 11-6 0 3 3 0 016 0z" />
         </svg>
       ),
-      color: 'from-rose-500 to-rose-600',
+      color: 'from-pink-500 to-rose-600',
       clickable: true,
       onClick: () => navigate('/persons'),
     },

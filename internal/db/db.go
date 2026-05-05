@@ -2,10 +2,13 @@ package db
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -64,6 +67,7 @@ CREATE TABLE IF NOT EXISTS photos (
     thumbnail_path TEXT,
     face_count INTEGER DEFAULT 0,
     has_faces BOOLEAN DEFAULT FALSE,
+    embedding BLOB,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -104,6 +108,8 @@ CREATE TABLE IF NOT EXISTS faces (
     encoding TEXT NOT NULL,
     confidence REAL DEFAULT 0.99,
     thumbnail_path TEXT,
+    recognition_confidence REAL DEFAULT NULL,
+    is_unknown BOOLEAN DEFAULT FALSE,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(photo_id, face_index),
@@ -120,11 +126,19 @@ CREATE TABLE IF NOT EXISTS persons (
     avatar TEXT,
     face_count INTEGER DEFAULT 0,
     photo_count INTEGER DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    centroid TEXT DEFAULT NULL
 );
 `
 	_, err := db.conn.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// 迁移：为已有表添加 embedding 字段（如果还不存在）
+	_, _ = db.conn.Exec(`ALTER TABLE photos ADD COLUMN embedding BLOB`)
+
+	return nil
 }
 
 // SavePhoto 保存或更新照片
@@ -137,8 +151,8 @@ func (db *DB) SavePhoto(photo *indexer.Photo) error {
 
 	// 插入或更新照片
 	_, err = tx.Exec(`
-		INSERT INTO photos (id, path, name, date_time, width, height, camera_make, camera_model, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO photos (id, path, name, date_time, width, height, camera_make, camera_model, embedding, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(path) DO UPDATE SET
 			id = excluded.id,
 			name = excluded.name,
@@ -147,8 +161,9 @@ func (db *DB) SavePhoto(photo *indexer.Photo) error {
 			height = excluded.height,
 			camera_make = excluded.camera_make,
 			camera_model = excluded.camera_model,
+			embedding = COALESCE(excluded.embedding, photos.embedding),
 			updated_at = CURRENT_TIMESTAMP
-	`, photo.ID, photo.Path, photo.Name, photo.DateTime, photo.Width, photo.Height, photo.CameraMake, photo.CameraModel)
+	`, photo.ID, photo.Path, photo.Name, photo.DateTime, photo.Width, photo.Height, photo.CameraMake, photo.CameraModel, photo.Embedding)
 	if err != nil {
 		return err
 	}
@@ -179,8 +194,8 @@ func (db *DB) SavePhotos(photos []indexer.Photo) error {
 	defer tx.Rollback()
 
 	stmtPhoto, err := tx.Prepare(`
-		INSERT INTO photos (id, path, name, date_time, width, height, camera_make, camera_model, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO photos (id, path, name, date_time, width, height, camera_make, camera_model, embedding, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(path) DO UPDATE SET
 			id = excluded.id,
 			name = excluded.name,
@@ -189,6 +204,7 @@ func (db *DB) SavePhotos(photos []indexer.Photo) error {
 			height = excluded.height,
 			camera_make = excluded.camera_make,
 			camera_model = excluded.camera_model,
+			embedding = COALESCE(excluded.embedding, photos.embedding),
 			updated_at = CURRENT_TIMESTAMP
 	`)
 	if err != nil {
@@ -209,7 +225,7 @@ func (db *DB) SavePhotos(photos []indexer.Photo) error {
 	defer stmtTag.Close()
 
 	for _, photo := range photos {
-		_, err = stmtPhoto.Exec(photo.ID, photo.Path, photo.Name, photo.DateTime, photo.Width, photo.Height, photo.CameraMake, photo.CameraModel)
+		_, err = stmtPhoto.Exec(photo.ID, photo.Path, photo.Name, photo.DateTime, photo.Width, photo.Height, photo.CameraMake, photo.CameraModel, photo.Embedding)
 		if err != nil {
 			return err
 		}
@@ -230,10 +246,63 @@ func (db *DB) SavePhotos(photos []indexer.Photo) error {
 	return tx.Commit()
 }
 
+// LoadPhotosByDir 按目录加载照片（路径前缀匹配）
+func (db *DB) LoadPhotosByDir(dir string) ([]indexer.Photo, error) {
+	// 将 ~ 展开为实际路径
+	if strings.HasPrefix(dir, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			dir = filepath.Join(home, dir[2:])
+		}
+	}
+	// 清理末尾斜杠
+	dir = strings.TrimSuffix(dir, "/")
+	
+	rows, err := db.conn.Query(`
+		SELECT id, path, name, date_time, width, height, camera_make, camera_model, embedding
+		FROM photos
+		WHERE path LIKE ?
+	`, dir+"/%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var photos []indexer.Photo
+	for rows.Next() {
+		var p indexer.Photo
+		var emb []byte
+		err := rows.Scan(&p.ID, &p.Path, &p.Name, &p.DateTime, &p.Width, &p.Height, &p.CameraMake, &p.CameraModel, &emb)
+		if err != nil {
+			return nil, err
+		}
+		if len(emb) > 0 {
+			p.Embedding = bytesToFloat32(emb)
+		}
+		
+		// 加载标签
+		tagRows, err := db.conn.Query(`SELECT tag FROM tags WHERE photo_id = ?`, p.ID)
+		if err != nil {
+			continue
+		}
+		for tagRows.Next() {
+			var tag string
+			if err := tagRows.Scan(&tag); err == nil {
+				p.Tags = append(p.Tags, tag)
+			}
+		}
+		tagRows.Close()
+		
+		photos = append(photos, p)
+	}
+	
+	return photos, rows.Err()
+}
+
 // LoadPhotos 加载所有照片
 func (db *DB) LoadPhotos() ([]indexer.Photo, error) {
 	rows, err := db.conn.Query(`
-		SELECT id, path, name, date_time, width, height, camera_make, camera_model
+		SELECT id, path, name, COALESCE(date_time, ''), COALESCE(width, 0), COALESCE(height, 0), COALESCE(camera_make, ''), COALESCE(camera_model, ''), embedding
 		FROM photos
 	`)
 	if err != nil {
@@ -244,9 +313,13 @@ func (db *DB) LoadPhotos() ([]indexer.Photo, error) {
 	var photos []indexer.Photo
 	for rows.Next() {
 		var p indexer.Photo
-		err := rows.Scan(&p.ID, &p.Path, &p.Name, &p.DateTime, &p.Width, &p.Height, &p.CameraMake, &p.CameraModel)
+		var emb []byte
+		err := rows.Scan(&p.ID, &p.Path, &p.Name, &p.DateTime, &p.Width, &p.Height, &p.CameraMake, &p.CameraModel, &emb)
 		if err != nil {
 			return nil, err
+		}
+		if len(emb) > 0 {
+			p.Embedding = bytesToFloat32(emb)
 		}
 		photos = append(photos, p)
 	}
@@ -460,10 +533,11 @@ func (db *DB) MigrateFromJSON(photosPath, tagsPath string) error {
 
 // FaceRecord 人脸记录
  type FaceRecord struct {
-	ID           int       `json:"id"`
+	ID             int       `json:"id"`
 	PhotoID      string    `json:"photo_id"`
 	FaceIndex    int       `json:"face_index"`
 	PersonID     *string   `json:"person_id,omitempty"`
+	PersonName   string    `json:"person_name,omitempty"`
 	Location     string    `json:"location"`
 	Encoding     string    `json:"encoding"`
 	Confidence   float64   `json:"confidence"`
@@ -473,10 +547,10 @@ func (db *DB) MigrateFromJSON(photosPath, tagsPath string) error {
 }
 
 // Person 人物记录
- type Person struct {
+type Person struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
-	Avatar     string    `json:"avatar,omitempty"`
+	Avatar     *string   `json:"avatar,omitempty"`
 	FaceCount  int       `json:"face_count"`
 	PhotoCount int       `json:"photo_count"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -627,10 +701,125 @@ func (db *DB) GetFaceByID(faceID int) (*FaceRecord, error) {
 // UpdateFaceLabel 更新人脸标注
 func (db *DB) UpdateFaceLabel(faceID int, personID string) error {
 	_, err := db.conn.Exec(`
-		UPDATE faces SET person_id = ?, updated_at = CURRENT_TIMESTAMP
+		UPDATE faces SET person_id = ?, is_unknown = 0, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`, personID, faceID)
 	return err
+}
+
+// UpdateFaceUnknownStatus 更新人脸的Unknown状态
+func (db *DB) UpdateFaceUnknownStatus(faceID int, isUnknown bool) error {
+	_, err := db.conn.Exec(`
+		UPDATE faces SET is_unknown = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, isUnknown, faceID)
+	return err
+}
+
+// GetUnknownFaces 获取Unknown状态的人脸列表
+func (db *DB) GetUnknownFaces(limit, offset int) ([]FaceRecord, int, error) {
+	var total int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM faces WHERE is_unknown = 1`).Scan(&total)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := db.conn.Query(`
+		SELECT f.id, f.photo_id, f.person_id, f.location, f.encoding, f.confidence, f.thumbnail_path, f.created_at, f.updated_at, p.name as person_name
+		FROM faces f
+		LEFT JOIN persons p ON f.person_id = p.id
+		WHERE f.is_unknown = 1
+		ORDER BY f.confidence DESC
+		LIMIT ? OFFSET ?
+	`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var faces []FaceRecord
+	for rows.Next() {
+		var f FaceRecord
+		var personName sql.NullString
+		err := rows.Scan(&f.ID, &f.PhotoID, &f.PersonID, &f.Location, &f.Encoding, &f.Confidence, &f.ThumbnailPath, &f.CreatedAt, &f.UpdatedAt, &personName)
+		if err != nil {
+			return nil, 0, err
+		}
+		if personName.Valid {
+			f.PersonName = personName.String
+		}
+		faces = append(faces, f)
+	}
+	return faces, total, rows.Err()
+}
+
+// SyncPersonsFromFaces 从 faces 表同步人物数据到 persons 表
+func (db *DB) SyncPersonsFromFaces() (int, error) {
+	// 检查 persons 表是否已有数据
+	var count int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM persons`).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	if count > 0 {
+		return count, nil // 已有数据，跳过
+	}
+
+	// 从 faces 表聚合人物数据
+	type personData struct {
+		personID   string
+		faceCount  int
+		photoCount int
+		avatar     string
+	}
+	var persons []personData
+
+	rows, err := db.conn.Query(`
+		SELECT person_id,
+		       COUNT(*) as face_count,
+		       COUNT(DISTINCT photo_id) as photo_count,
+		       MIN(thumbnail_path) as avatar
+		FROM faces
+		WHERE person_id IS NOT NULL AND person_id != ''
+		GROUP BY person_id
+		ORDER BY face_count DESC
+	`)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var pd personData
+		var avatar sql.NullString
+		if err := rows.Scan(&pd.personID, &pd.faceCount, &pd.photoCount, &avatar); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if avatar.Valid {
+			pd.avatar = avatar.String
+		}
+		persons = append(persons, pd)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	if len(persons) == 0 {
+		return 0, nil
+	}
+
+	// 插入 persons 记录
+	now := time.Now()
+	for _, pd := range persons {
+		_, err := db.conn.Exec(`
+			INSERT OR IGNORE INTO persons (id, name, avatar, face_count, photo_count, created_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, pd.personID, pd.personID, pd.avatar, pd.faceCount, pd.photoCount, now)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(persons), nil
 }
 
 // CreatePerson 创建人物
@@ -655,17 +844,26 @@ func (db *DB) GetPersonByID(personID string) (*Person, error) {
 	return &p, nil
 }
 
-// GetPersons 获取人物列表
+// GetPersons 获取人物列表（只返回有有效人脸样本的人物）
 func (db *DB) GetPersons(limit, offset int) ([]Person, int, error) {
 	var total int
-	err := db.conn.QueryRow(`SELECT COUNT(*) FROM persons`).Scan(&total)
+	err := db.conn.QueryRow(`
+		SELECT COUNT(DISTINCT p.id) 
+		FROM persons p
+		INNER JOIN faces f ON f.person_id = p.id
+		WHERE f.thumbnail_path IS NOT NULL AND f.thumbnail_path != ''
+	`).Scan(&total)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	rows, err := db.conn.Query(`
-		SELECT id, name, avatar, face_count, photo_count, created_at
-		FROM persons ORDER BY name LIMIT ? OFFSET ?
+		SELECT DISTINCT p.id, p.name, p.avatar, p.face_count, p.photo_count, p.created_at
+		FROM persons p
+		INNER JOIN faces f ON f.person_id = p.id
+		WHERE f.thumbnail_path IS NOT NULL AND f.thumbnail_path != ''
+		ORDER BY p.face_count DESC, p.name
+		LIMIT ? OFFSET ?
 	`, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -703,6 +901,43 @@ func (db *DB) UpdatePersonName(personID, name string) error {
 	`, name, personID)
 	return err
 }
+
+// SaveEmbedding 保存照片 embedding 到 SQLite
+func (db *DB) SaveEmbedding(photoID string, embedding []float32) error {
+	data := float32ToBytes(embedding)
+	_, err := db.conn.Exec(`
+		UPDATE photos SET embedding = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?
+	`, data, photoID)
+	return err
+}
+
+// LoadPhotosWithEmbeddings 加载所有照片（包含 embedding）
+func (db *DB) LoadPhotosWithEmbeddings() ([]indexer.Photo, error) {
+	return db.LoadPhotos()
+}
+
+// float32ToBytes 将 []float32 转为 []byte（little endian）
+func float32ToBytes(v []float32) []byte {
+	buf := make([]byte, len(v)*4)
+	for i, f := range v {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
+	}
+	return buf
+}
+
+// bytesToFloat32 将 []byte 转回 []float32（little endian）
+func bytesToFloat32(b []byte) []float32 {
+	if len(b)%4 != 0 {
+		return nil
+	}
+	v := make([]float32, len(b)/4)
+	for i := range v {
+		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return v
+}
+
 func (db *DB) SearchPhotosByPerson(personID string, limit, offset int) ([]indexer.Photo, int, error) {
 	var total int
 	err := db.conn.QueryRow(`
@@ -756,7 +991,10 @@ func (db *DB) GetClusters() (*sql.Rows, error) {
 			(
 				SELECT id FROM faces f2
 				WHERE f2.person_id = f1.person_id
-				ORDER BY (
+				  AND f2.thumbnail_path IS NOT NULL
+				  AND f2.thumbnail_path != ''
+				  AND f2.confidence >= 0.5
+				ORDER BY confidence DESC, (
 					CAST(json_extract(f2.location, '$.right') AS INT) - CAST(json_extract(f2.location, '$.left') AS INT)
 				) * (
 					CAST(json_extract(f2.location, '$.bottom') AS INT) - CAST(json_extract(f2.location, '$.top') AS INT)
@@ -765,7 +1003,11 @@ func (db *DB) GetClusters() (*sql.Rows, error) {
 			) as sample_face_id
 		FROM faces f1
 		WHERE person_id IS NOT NULL
+		  AND confidence >= 0.5
+		  AND thumbnail_path IS NOT NULL
+		  AND thumbnail_path != ''
 		GROUP BY person_id
+		HAVING face_count >= 2
 		ORDER BY face_count DESC
 	`)
 }

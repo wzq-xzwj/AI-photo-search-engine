@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"photo-search-engine/internal"
 	"photo-search-engine/internal/api/handlers"
@@ -87,12 +91,37 @@ func main() {
 		scanSvc = scanner.NewWithML(idx, mlClient, vectorIndex)
 	}
 
-	// 从数据库加载照片数据（优先）
+	// 从数据库加载照片数据（优先），并恢复 embedding
+	dbLoaded := false
+	var dbPhotos []indexer.Photo
 	if database != nil {
 		photos, err := database.LoadPhotos()
-		if err == nil && len(photos) > 0 {
+		if err != nil {
+			zapLog.Error("从数据库加载照片失败", zap.Error(err))
+		} else {
 			zapLog.Info("从数据库恢复照片数据", zap.Int("count", len(photos)))
-			idx.UpdatePhotosMeta(photos)
+			if len(photos) > 0 {
+				idx.UpdatePhotosMeta(photos)
+				dbLoaded = true
+				dbPhotos = photos
+			}
+		}
+	}
+
+	// 如果 Milvus 可用，将 SQLite 中的 embedding 批量导入 Milvus
+	if dbLoaded && vectorIndex != nil && vectorIndex.Size() == 0 && len(dbPhotos) > 0 {
+		var batchItems []internal.ImageEmbedding
+		for _, p := range dbPhotos {
+			if len(p.Embedding) > 0 {
+				batchItems = append(batchItems, internal.ImageEmbedding{
+					Path:      p.Path,
+					Embedding: p.Embedding,
+				})
+			}
+		}
+		if len(batchItems) > 0 {
+			vectorIndex.BatchAdd(batchItems)
+			zapLog.Info("从 SQLite 恢复 embedding 到 Milvus", zap.Int("count", len(batchItems)))
 		}
 	}
 
@@ -102,9 +131,23 @@ func main() {
 		idx.UpdatePhotos(vectorIndex.GetAllPaths())
 	}
 
-	// 从文件恢复标签（兼容旧版本）
-	idx.LoadTagsFromFile()
-	zapLog.Info("标签文件加载完成")
+	// 仅在数据库未加载时从文件恢复标签（避免覆盖数据库中的丰富标签）
+	if !dbLoaded {
+		idx.LoadTagsFromFile()
+		zapLog.Info("标签文件加载完成")
+	} else {
+		zapLog.Info("跳过标签文件加载（数据库已有完整标签）")
+	}
+
+	// 同步人物数据（persons 表）
+	if database != nil {
+		personCount, err := database.SyncPersonsFromFaces()
+		if err != nil {
+			zapLog.Warn("同步人物数据失败", zap.Error(err))
+		} else {
+			zapLog.Info("人物数据同步完成", zap.Int("count", personCount))
+		}
+	}
 
 	// Initialize LLM client for query parsing
 	llmClient, err := query.NewLLMClientFromEnv()
@@ -121,7 +164,7 @@ func main() {
 
 	// Initialize handlers
 	searchHandler := handlers.NewSearchHandlerWithLLM(idx, zapLog, llmClient)
-	photosHandler := handlers.NewPhotosHandler(idx, mlClient, zapLog)
+	photosHandler := handlers.NewPhotosHandler(idx, mlClient, database, zapLog)
 	statsHandler := handlers.NewStatsHandler(idx, zapLog)
 	chatHandler := handlers.NewChatHandler(idx, zapLog)
 	filesHandler := handlers.NewFilesHandler(scanSvc, zapLog)
@@ -164,9 +207,38 @@ func main() {
 	// Static files
 	r.Static("/uploads", "./uploads")
 
-	// Start server
-	zapLog.Info("Server starting", zap.String("addr", cfg.ServerAddr))
-	if err := r.Run(cfg.ServerAddr); err != nil {
-		zapLog.Fatal("Server failed to start", zap.Error(err))
+	// Create http.Server
+	srv := &http.Server{
+		Addr:    cfg.ServerAddr,
+		Handler: r,
 	}
+
+	// Start server in a goroutine
+	go func() {
+		zapLog.Info("Server starting", zap.String("addr", cfg.ServerAddr))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			zapLog.Fatal("Server failed to start", zap.Error(err))
+		}
+	}()
+
+	// Wait for interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	zapLog.Info("Server shutting down gracefully...")
+
+	// Graceful shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		zapLog.Error("Server forced to shutdown", zap.Error(err))
+	}
+
+	// Close vector index
+	if err := vectorIndex.Close(); err != nil {
+		zapLog.Error("Failed to close vector index", zap.Error(err))
+	}
+
+	zapLog.Info("Server exited")
 }

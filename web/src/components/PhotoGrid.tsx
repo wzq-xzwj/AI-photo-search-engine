@@ -30,7 +30,7 @@ function getColumns() {
 
 const GAP = 16
 const ROW_HEIGHT_ESTIMATE = 220
-const PAGE_SIZE = 30
+const PAGE_SIZE = 40
 const OVERSCAN_ROWS = 3
 
 // 使用 IntersectionObserver 进行图片懒加载
@@ -93,9 +93,9 @@ const PhotoCard = memo(function PhotoCard({
           <p className="text-white/70 text-xs mt-0.5">{photo.date}</p>
         </div>
       </div>
-      <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-        {photo.tags.slice(0, 2).map((tag) => (
-          <span key={tag} className="px-2 py-0.5 text-xs rounded-full bg-primary-500/90 text-white backdrop-blur-sm">
+      <div className="absolute top-2 right-2 flex flex-wrap gap-1 max-w-[70%] justify-end opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+        {photo.tags && photo.tags.slice(0, 3).map((tag) => (
+          <span key={tag} className="px-2 py-0.5 text-xs rounded-full bg-primary-500/90 text-white backdrop-blur-sm whitespace-nowrap">
             {tag}
           </span>
         ))}
@@ -267,21 +267,49 @@ export default function PhotoGrid({
     }
   }, [handleScroll])
 
-  // Lightbox 键盘导航
+  // Lightbox 键盘导航 & 按钮
+  const pendingNextRef = useRef(false)
+
+  // 当 photos 变化且之前点了"下一张"加载更多，自动跳转
+  useEffect(() => {
+    if (pendingNextRef.current && selectedPhoto) {
+      const idx = photos.findIndex(p => p.id === selectedPhoto.id)
+      if (idx < photos.length - 1) {
+        setSelectedPhoto(photos[idx + 1])
+        pendingNextRef.current = false
+        setLoadingMore(false)
+      }
+    }
+  }, [photos, selectedPhoto])
+
+  const navigatePhoto = useCallback((direction: 'prev' | 'next') => {
+    if (!selectedPhoto) return
+    const idx = photos.findIndex(p => p.id === selectedPhoto.id)
+    if (idx === -1) return
+
+    if (direction === 'prev' && idx > 0) {
+      setSelectedPhoto(photos[idx - 1])
+    } else if (direction === 'next') {
+      if (idx < photos.length - 1) {
+        setSelectedPhoto(photos[idx + 1])
+      } else if (hasMore && onLoadMore && !loadingMore) {
+        pendingNextRef.current = true
+        setLoadingMore(true)
+        onLoadMore()
+      }
+    }
+  }, [selectedPhoto, photos, hasMore, onLoadMore, loadingMore])
+
   useEffect(() => {
     if (!selectedPhoto) return
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setSelectedPhoto(null)
-        return
-      }
-      const idx = photos.findIndex(p => p.id === selectedPhoto.id)
-      if (e.key === 'ArrowLeft' && idx > 0) setSelectedPhoto(photos[idx - 1])
-      else if (e.key === 'ArrowRight' && idx < photos.length - 1) setSelectedPhoto(photos[idx + 1])
+      if (e.key === 'Escape') { setSelectedPhoto(null); return }
+      if (e.key === 'ArrowLeft') navigatePhoto('prev')
+      else if (e.key === 'ArrowRight') navigatePhoto('next')
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selectedPhoto, photos])
+  }, [selectedPhoto, navigatePhoto])
 
   const topSpacerHeight = useMemo(() => {
     const rows = Math.floor(visibleRange.start / columns)
@@ -329,7 +357,7 @@ export default function PhotoGrid({
     <>
       <div
         ref={containerRef}
-        className="h-[calc(100vh-200px)] overflow-y-auto scrollbar-thin"
+        className="max-h-[70vh] overflow-y-auto scrollbar-thin"
       >
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 p-4">
           {topSpacerHeight > 0 && (
@@ -392,9 +420,9 @@ export default function PhotoGrid({
                   {[selectedPhoto.cameraMake, selectedPhoto.cameraModel].filter(Boolean).join(' ')}
                 </p>
               )}
-              <div className="flex gap-2 mt-2">
-                {selectedPhoto.tags.map((tag) => (
-                  <span key={tag} className="px-2 py-0.5 text-xs rounded-full bg-primary-500/90 text-white">
+              <div className="flex flex-wrap gap-2 mt-2">
+                {selectedPhoto.tags && selectedPhoto.tags.map((tag) => (
+                  <span key={tag} className="px-2 py-0.5 text-xs rounded-full bg-primary-500/90 text-white whitespace-nowrap">
                     {tag}
                   </span>
                 ))}
@@ -411,10 +439,7 @@ export default function PhotoGrid({
 
             {photos.findIndex(p => p.id === selectedPhoto.id) > 0 && (
               <button
-                onClick={() => {
-                  const idx = photos.findIndex(p => p.id === selectedPhoto.id)
-                  if (idx > 0) setSelectedPhoto(photos[idx - 1])
-                }}
+                onClick={() => navigatePhoto('prev')}
                 className="absolute left-4 top-1/2 -translate-y-1/2 p-3 rounded-full bg-white/20 hover:bg-white/30 text-white backdrop-blur-sm transition-colors"
               >
                 <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -422,18 +447,24 @@ export default function PhotoGrid({
                 </svg>
               </button>
             )}
-            {photos.findIndex(p => p.id === selectedPhoto.id) < photos.length - 1 && (
+            {(photos.findIndex(p => p.id === selectedPhoto.id) < photos.length - 1 || (hasMore && !loadingMore)) && (
               <button
-                onClick={() => {
-                  const idx = photos.findIndex(p => p.id === selectedPhoto.id)
-                  if (idx < photos.length - 1) setSelectedPhoto(photos[idx + 1])
-                }}
-                className="absolute right-4 top-1/2 -translate-y-1/2 p-3 rounded-full bg-white/20 hover:bg-white/30 text-white backdrop-blur-sm transition-colors"
+                onClick={() => navigatePhoto('next')}
+                disabled={loadingMore}
+                className="absolute right-4 top-1/2 -translate-y-1/2 p-3 rounded-full bg-white/20 hover:bg-white/30 text-white backdrop-blur-sm transition-colors disabled:opacity-50"
               >
                 <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                 </svg>
               </button>
+            )}
+            {loadingMore && photos.findIndex(p => p.id === selectedPhoto.id) >= photos.length - 1 && (
+              <div className="absolute right-4 top-1/2 -translate-y-1/2 p-3 rounded-full bg-white/20 text-white backdrop-blur-sm">
+                <svg className="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" opacity="0.3"/>
+                  <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+                </svg>
+              </div>
             )}
           </div>
         </div>

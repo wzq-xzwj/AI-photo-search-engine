@@ -1,7 +1,7 @@
 package internal
 
 import (
-	"fmt"
+	"log"
 	"net"
 	"os"
 	"time"
@@ -21,17 +21,17 @@ func NewVectorIndex(indexPath string) *VectorIndex {
 	if milvusAddr == "" {
 		milvusAddr = "localhost:19530"
 	}
-	
+
 	conn, err := net.DialTimeout("tcp", milvusAddr, 2*time.Second)
 	if err != nil {
-		fmt.Printf("Milvus 不可达 (%s): %v，跳过向量索引\n", milvusAddr, err)
+		log.Printf("Milvus 不可达 (%s): %v，跳过向量索引\n", milvusAddr, err)
 		return nil
 	}
 	conn.Close()
 
 	milvus, err := vector.NewMilvusIndex(milvusAddr)
 	if err != nil {
-		fmt.Printf("初始化 Milvus 失败: %v\n", err)
+		log.Printf("初始化 Milvus 失败: %v\n", err)
 		return nil
 	}
 
@@ -48,7 +48,7 @@ func (vi *VectorIndex) Add(path string, embedding []float32) {
 
 	photoID := path // 使用路径作为 photoID
 	if err := vi.milvus.AddPhoto(photoID, path, embedding); err != nil {
-		fmt.Printf("添加向量失败: %v\n", err)
+		log.Printf("添加向量失败: %v\n", err)
 	}
 }
 
@@ -69,7 +69,7 @@ func (vi *VectorIndex) BatchAdd(items []ImageEmbedding) {
 	}
 
 	if err := vi.milvus.AddPhotosBatch(photoIDs, filePaths, vectors); err != nil {
-		fmt.Printf("批量添加向量失败: %v\n", err)
+		log.Printf("批量添加向量失败: %v\n", err)
 	}
 }
 
@@ -81,7 +81,7 @@ func (vi *VectorIndex) SearchByEmbedding(queryEmbedding []float32, limit int) []
 
 	photoIDs, filePaths, scores, err := vi.milvus.Search(queryEmbedding, limit)
 	if err != nil {
-		fmt.Printf("搜索失败: %v\n", err)
+		log.Printf("搜索失败: %v\n", err)
 		return nil
 	}
 
@@ -140,7 +140,7 @@ func (vi *VectorIndex) Clear() {
 	}
 
 	if err := vi.milvus.DropCollection(); err != nil {
-		fmt.Printf("清空索引失败: %v\n", err)
+		log.Printf("清空索引失败: %v\n", err)
 	}
 }
 

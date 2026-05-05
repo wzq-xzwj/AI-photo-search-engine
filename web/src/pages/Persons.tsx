@@ -51,8 +51,10 @@ export default function Persons() {
       if (!res.ok) throw new Error('加载人物列表失败')
       const data = await res.json()
       const clusters: ClusteredPerson[] = data.data?.clusters || []
-      setPersons(clusters)
-      setTotal(clusters.length)
+      // 过滤掉没有人脸样本的人物（避免显示非人脸照片）
+      const validClusters = clusters.filter((p: ClusteredPerson) => p.sample_face !== null && p.face_count > 0)
+      setPersons(validClusters)
+      setTotal(validClusters.length)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载人物列表失败')
       // 降级：使用旧 API

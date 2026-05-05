@@ -17,30 +17,28 @@ import (
 	"photo-search-engine/internal/indexer"
 )
 
-var similarityLabels = loadSimilarityLabels()
+var similarityLabels = loadSimilarityLabelsV2()
 
-func loadSimilarityLabels() []string {
-	path := "config/label_space_v1.json"
+func loadSimilarityLabelsV2() []string {
+	v2Path := "config/label_space_v2.json"
 	if envPath := os.Getenv("LABEL_SPACE_PATH"); envPath != "" {
-		path = envPath
+		v2Path = envPath
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return []string{
-			"城市街景", "古建筑", "现代建筑", "公园园林", "海滨沙滩",
-			"山川湖泊", "室内场景", "夜景灯光", "人物合影", "美食餐饮",
+	if data, err := os.ReadFile(v2Path); err == nil {
+		var spaceV2 struct {
+			Categories map[string][]string `json:"categories"`
+		}
+		if json.Unmarshal(data, &spaceV2) == nil {
+			var flat []string
+			for _, labels := range spaceV2.Categories {
+				flat = append(flat, labels...)
+			}
+			if len(flat) > 0 {
+				return flat
+			}
 		}
 	}
-	var space struct {
-		Flat []string `json:"flat"`
-	}
-	if err := json.Unmarshal(data, &space); err != nil {
-		return []string{"城市街景", "古建筑", "室内场景", "人物合影", "美食餐饮"}
-	}
-	if len(space.Flat) == 0 {
-		return []string{"城市街景", "古建筑", "室内场景", "人物合影", "美食餐饮"}
-	}
-	return space.Flat
+	return []string{"自然风光", "人物合影", "城市街景", "古建筑", "美食餐饮", "花卉"}
 }
 
 // Progress 扫描进度更新
@@ -515,7 +513,7 @@ func (s *Scanner) classifyAndUpdateTags(batch []string, baseDir string) {
 	if s.mlClient == nil {
 		return
 	}
-	results, err := s.mlClient.SimilarityBatch(batch, similarityLabels, 3)
+	results, err := s.mlClient.SimilarityBatchV2(batch, similarityLabels, 10, 0.25)
 	if err != nil {
 		fmt.Printf("  ⚠ 批量相似度计算失败: %v\n", err)
 		return

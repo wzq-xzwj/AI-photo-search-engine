@@ -1,6 +1,6 @@
 #!/bin/bash
 # PhotoLens AI - 一键启动脚本
-# 启动所有服务：ML Service、Go Backend、Frontend
+# 启动所有服务：ML Service (InsightFace + CLIP)、Go Backend、Frontend
 
 set -e
 
@@ -9,9 +9,8 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 项目目录
 PROJECT_DIR="/Users/wuzhaoqing/Pictures/photo-search-engine"
 cd "$PROJECT_DIR"
 
@@ -21,38 +20,47 @@ echo -e "${BLUE}========================================${NC}"
 echo ""
 
 # 检查并关闭已运行的服务
-echo -e "${YELLOW}[1/6] 检查并关闭已运行的服务...${NC}"
+echo -e "${YELLOW}[1/5] 检查并关闭已运行的服务...${NC}"
 pkill -f "uvicorn app.main:app" 2>/dev/null || true
 pkill -f "photo-server" 2>/dev/null || true
 pkill -f "npm run dev" 2>/dev/null || true
 sleep 2
 
-# 启动 Milvus
-echo -e "${YELLOW}[2/6] 启动 Milvus...${NC}"
-if [ -f "$PROJECT_DIR/scripts/start-milvus.sh" ]; then
-    cd "$PROJECT_DIR"
-    ./scripts/start-milvus.sh
+# 加载环境变量
+if [ -f "$PROJECT_DIR/.env" ]; then
+    export $(grep -v '^#' "$PROJECT_DIR/.env" | xargs)
+    echo -e "${GREEN}  ✓ 已加载 .env${NC}"
+elif [ -f "$PROJECT_DIR/.env.deepseek" ]; then
+    export $(grep -v '^#' "$PROJECT_DIR/.env.deepseek" | xargs)
+    echo -e "${GREEN}  ✓ 已加载 .env.deepseek${NC}"
 else
-    echo -e "${YELLOW}⚠ Milvus 启动脚本不存在，跳过${NC}"
+    echo -e "${YELLOW}  ⚠ 未找到 .env 文件，使用默认配置${NC}"
 fi
 
 # 启动 ML Service
-echo -e "${YELLOW}[3/6] 启动 ML Service (端口 8000)...${NC}"
+echo -e "${YELLOW}[2/5] 启动 ML Service (端口 8000)...${NC}"
 cd "$PROJECT_DIR/ml-service"
-source venv/bin/activate
+if [ ! -d "venv" ]; then
+    echo -e "${YELLOW}  创建虚拟环境...${NC}"
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
+else
+    source venv/bin/activate
+fi
 nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 > /tmp/ml-service.log 2>&1 &
 ML_PID=$!
-echo "ML Service PID: $ML_PID"
+echo "  ML Service PID: $ML_PID"
 
 # 等待 ML Service 就绪
-echo -e "${YELLOW}[4/6] 等待 ML Service 就绪...${NC}"
-for i in {1..60}; do
+echo -e "${YELLOW}[3/5] 等待 ML Service 就绪...${NC}"
+for i in {1..120}; do
     if curl -sf http://127.0.0.1:8000/api/v1/health >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ ML Service 已就绪${NC}"
+        echo -e "${GREEN}  ✓ ML Service 已就绪${NC}"
         break
     fi
     if ! kill -0 $ML_PID 2>/dev/null; then
-        echo -e "${RED}✗ ML Service 启动失败${NC}"
+        echo -e "${RED}  ✗ ML Service 启动失败，查看日志: /tmp/ml-service.log${NC}"
         exit 1
     fi
     echo -n "."
@@ -60,40 +68,45 @@ for i in {1..60}; do
 done
 echo ""
 
-# 启动 Go Backend
-echo -e "${YELLOW}[5/6] 启动 Go Backend (端口 8080)...${NC}"
+# 编译 Go Backend (如果需要)
+echo -e "${YELLOW}[4/5] 启动 Go Backend (端口 8080)...${NC}"
 cd "$PROJECT_DIR"
-export LLM_PROVIDER=openai
-export OPENAI_BASE_URL=https://api.deepseek.com/v1
-export OPENAI_API_KEY=sk-13d33f25229248d28915daf3761ff0e7
-export OPENAI_MODEL=deepseek-chat
-
+if [ ! -f "photo-server" ] || [ "cmd/server/main.go" -nt "photo-server" ]; then
+    echo "  编译 Go Backend..."
+    go build -o photo-server ./cmd/server/main.go
+fi
 nohup ./photo-server > /tmp/go-backend.log 2>&1 &
 GO_PID=$!
-echo "Go Backend PID: $GO_PID"
+echo "  Go Backend PID: $GO_PID"
 
-# 等待 Go Backend 就绪
 sleep 2
-if curl -sf http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1; then
-    echo -e "${GREEN}✓ Go Backend 已就绪${NC}"
+if curl -sf http://127.0.0.1:8080/api/v1/dirs >/dev/null 2>&1; then
+    echo -e "${GREEN}  ✓ Go Backend 已就绪${NC}"
 else
-    echo -e "${RED}✗ Go Backend 启动失败，查看日志: /tmp/go-backend.log${NC}"
+    echo -e "${RED}  ✗ Go Backend 启动失败，查看日志: /tmp/go-backend.log${NC}"
     exit 1
 fi
 
 # 启动 Frontend
-echo -e "${YELLOW}[6/6] 启动 Frontend (端口 5173)...${NC}"
+echo -e "${YELLOW}[5/5] 启动 Frontend (端口 5173)...${NC}"
 cd "$PROJECT_DIR/web"
+if [ ! -d "node_modules" ]; then
+    echo "  安装前端依赖..."
+    npm install
+fi
 nohup npm run dev > /tmp/frontend.log 2>&1 &
 FE_PID=$!
-echo "Frontend PID: $FE_PID"
+echo "  Frontend PID: $FE_PID"
 
-# 等待 Frontend 就绪
 sleep 3
-if curl -sf http://127.0.0.1:5173 >/dev/null 2>&1; then
-    echo -e "${GREEN}✓ Frontend 已就绪${NC}"
+FRONTEND_PORT=$(grep -o 'localhost:[0-9]*' /tmp/frontend.log | head -1 | cut -d: -f2)
+if [ -z "$FRONTEND_PORT" ]; then
+    FRONTEND_PORT=5173
+fi
+if curl -sf "http://127.0.0.1:$FRONTEND_PORT" >/dev/null 2>&1; then
+    echo -e "${GREEN}  ✓ Frontend 已就绪${NC}"
 else
-    echo -e "${YELLOW}⚠ Frontend 可能需要更长时间启动${NC}"
+    echo -e "${YELLOW}  ⚠ Frontend 可能需要更长时间启动${NC}"
 fi
 
 echo ""
@@ -102,11 +115,9 @@ echo -e "${GREEN}  所有服务已启动！${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 echo -e "访问地址:"
-echo -e "  ${BLUE}前端界面:${NC} http://localhost:5173"
+echo -e "  ${BLUE}前端界面:${NC} http://localhost:$FRONTEND_PORT"
 echo -e "  ${BLUE}后端 API:${NC} http://localhost:8080"
 echo -e "  ${BLUE}ML 服务:${NC}  http://localhost:8000"
-echo -e "  ${BLUE}Milvus:${NC}   localhost:19530"
-echo -e "  ${BLUE}Attu:${NC}     http://localhost:8000"
 echo ""
 echo -e "日志文件:"
 echo -e "  ${YELLOW}ML Service:${NC}  /tmp/ml-service.log"
@@ -116,7 +127,7 @@ echo ""
 echo -e "停止服务: ${RED}./stop.sh${NC}"
 echo ""
 
-# 保存 PID 到文件
+# 保存 PID
 echo "$ML_PID" > /tmp/photolens.pids
 echo "$GO_PID" >> /tmp/photolens.pids
 echo "$FE_PID" >> /tmp/photolens.pids

@@ -52,6 +52,12 @@ export default {
           text: '#E4E6F0',
           muted: '#8B8FA8',
         },
+        cream: {
+          50: '#fdfcf9',
+          100: '#faf9f5',
+          200: '#f5f4f0',
+          300: '#e8e6db',
+        },
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],

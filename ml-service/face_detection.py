@@ -16,6 +16,13 @@ import base64
 from typing import List, Dict, Tuple, Optional
 import logging
 
+# 导入质量检查模块
+try:
+    from face_quality import FaceQualityChecker, check_face_quality
+    _QUALITY_CHECK_AVAILABLE = True
+except ImportError:
+    _QUALITY_CHECK_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,6 +105,9 @@ class FaceDetector:
                     "confidence": confidence
                 })
             
+            # 过滤低质量检测
+            faces = self.filter_faces(faces, min_confidence=0.5, min_size=80)
+            
             logger.info(f"Detected {len(faces)} faces from byte data")
             return faces
             
@@ -107,13 +117,13 @@ class FaceDetector:
     
     def detect_faces(self, image_path: str) -> List[Dict]:
         """
-        检测照片中的人脸
+        检测照片中的人脸 (增强版，带质量检查)
         
         Args:
             image_path: 照片路径
             
         Returns:
-            人脸列表，包含位置、特征向量等信息
+            人脸列表，包含位置、特征向量、质量分数等信息
         """
         try:
             # 加载图片
@@ -133,22 +143,47 @@ class FaceDetector:
             for i, (location, encoding) in enumerate(zip(face_locations, face_encodings)):
                 top, right, bottom, left = location
                 
+                # 基础人脸信息
+                face_location = {
+                    "top": top,
+                    "right": right,
+                    "bottom": bottom,
+                    "left": left,
+                    "width": right - left,
+                    "height": bottom - top
+                }
+                
                 # 计算人脸置信度 (基于检测质量)
                 confidence = self._calculate_confidence(image, location)
                 
-                faces.append({
+                # 第二阶段优化: 质量检查
+                quality_result = None
+                if _QUALITY_CHECK_AVAILABLE:
+                    try:
+                        quality_result = check_face_quality(image, face_location)
+                        # 质量检查未通过，降低置信度
+                        if not quality_result['quality_pass']:
+                            confidence *= 0.5  # 惩罚
+                            logger.debug(f"Face {i} failed quality check: {quality_result}")
+                    except Exception as e:
+                        logger.warning(f"Quality check failed for face {i}: {e}")
+                
+                face_info = {
                     "index": i,
-                    "location": {
-                        "top": top,
-                        "right": right,
-                        "bottom": bottom,
-                        "left": left,
-                        "width": right - left,
-                        "height": bottom - top
-                    },
+                    "location": face_location,
                     "encoding": encoding.tolist(),  # numpy数组转列表
-                    "confidence": confidence
-                })
+                    "confidence": confidence,
+                    "quality": quality_result  # 新增质量信息
+                }
+                
+                faces.append(face_info)
+            
+            # 过滤低质量检测 (第二阶段: 增加质量过滤)
+            faces = self.filter_faces(faces, min_confidence=0.5, min_size=80)
+            
+            # 额外过滤质量检查未通过的
+            if _QUALITY_CHECK_AVAILABLE:
+                faces = [f for f in faces if f.get('quality') is None or f['quality'].get('quality_pass', True)]
             
             logger.info(f"Detected {len(faces)} faces in {image_path}")
             return faces
@@ -305,7 +340,7 @@ class FaceDetector:
         """
         计算人脸检测的置信度
         
-        基于人脸大小、清晰度等因素
+        基于人脸大小、宽高比、清晰度、人脸占比等因素
         """
         top, right, bottom, left = location
         face_width = right - left
@@ -313,19 +348,102 @@ class FaceDetector:
         
         # 人脸占图片比例
         image_height, image_width = image.shape[:2]
-        face_ratio = (face_width * face_height) / (image_width * image_height)
+        face_area = face_width * face_height
+        image_area = image_width * image_height
+        face_ratio = face_area / image_area
         
         # 基础置信度
-        confidence = 0.99
+        confidence = 0.5
         
-        # 根据人脸大小调整
-        if face_ratio < 0.01:  # 人脸太小
+        # 人脸大小检查
+        min_pixels = 100
+        if face_width < min_pixels or face_height < min_pixels:
+            confidence -= 0.3
+        elif face_width < 80 or face_height < 80:
+            confidence -= 0.15
+        else:
+            confidence += 0.05
+        
+        # 宽高比检查
+        aspect_ratio = face_height / max(face_width, 1)
+        if aspect_ratio < 0.8 or aspect_ratio > 1.5:
+            confidence -= 0.25
+        elif aspect_ratio < 0.9 or aspect_ratio > 1.3:
             confidence -= 0.1
-        elif face_ratio > 0.5:  # 人脸太大（可能是误检）
-            confidence -= 0.05
+        else:
+            confidence += 0.05
+        
+        # 人脸占图片比例检查
+        if face_ratio < 0.005:
+            confidence -= 0.25
+        elif face_ratio < 0.01:
+            confidence -= 0.1
+        elif face_ratio > 0.8:
+            confidence -= 0.25
+        elif face_ratio > 0.6:
+            confidence -= 0.1
+        elif 0.02 < face_ratio < 0.3:
+            confidence += 0.05
+        
+        # 清晰度估算 (基于边缘检测)
+        face_region = image[top:bottom, left:right]
+        if face_region.size > 0:
+            gray = np.mean(face_region, axis=2) if face_region.ndim == 3 else face_region
+            grad_x = np.abs(np.diff(gray, axis=1))
+            grad_y = np.abs(np.diff(gray, axis=0))
+            sharpness = (np.mean(grad_x) + np.mean(grad_y)) / 2
+            
+            # 模糊惩罚
+            if sharpness < 10:  # 很模糊
+                confidence -= 0.2
+            elif sharpness < 20:  # 有点模糊
+                confidence -= 0.05
+            else:  # 清晰
+                confidence += 0.1
         
         # 确保在合理范围
-        return max(0.5, min(0.99, confidence))
+        return max(0.1, min(0.99, confidence))
+    
+    def filter_faces(self, faces: List[Dict], min_confidence: float = 0.5, 
+                     min_size: int = 80, max_ratio_deviation: float = 0.3) -> List[Dict]:
+        """
+        过滤低质量的人脸检测
+        
+        Args:
+            faces: 原始检测到的人脸列表
+            min_confidence: 最小置信度阈值 (默认0.5)
+            min_size: 最小人脸像素尺寸 (默认80)
+            max_ratio_deviation: 最大宽高比偏差
+            
+        Returns:
+            过滤后的人脸列表
+        """
+        filtered = []
+        for face in faces:
+            loc = face["location"]
+            width = loc.get("width", loc.get("right", 0) - loc.get("left", 0))
+            height = loc.get("height", loc.get("bottom", 0) - loc.get("top", 0))
+            
+            # 检查置信度 (严格)
+            if face.get("confidence", 0) < min_confidence:
+                logger.debug(f"过滤低置信度人脸: {face.get('confidence', 0):.2f} < {min_confidence}")
+                continue
+            
+            # 检查最小尺寸 (严格)
+            if width < min_size or height < min_size:
+                logger.debug(f"过滤小人脸: {width}x{height} < {min_size}")
+                continue
+            
+            # 检查宽高比 (严格: 0.8 ~ 1.5)
+            aspect_ratio = height / max(width, 1)
+            if aspect_ratio < 0.8 or aspect_ratio > 1.5:
+                logger.debug(f"过滤异常比例人脸: 宽高比={aspect_ratio:.2f}")
+                continue
+            
+            filtered.append(face)
+        
+        logger.info(f"人脸过滤: {len(faces)} -> {len(filtered)} (过滤 {len(faces)-len(filtered)} 个)")
+        return filtered
 
 
 # 全局检测器实例

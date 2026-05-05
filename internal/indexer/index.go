@@ -3,6 +3,7 @@ package indexer
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +11,8 @@ import (
 	"sync"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+
+	"go.uber.org/zap"
 
 	"photo-search-engine/internal"
 )
@@ -22,6 +25,7 @@ type Index struct {
 	vectorIndex *internal.VectorIndex
 	queryCache  *lru.Cache[string, []float32] // 查询向量缓存（LRU，限制1000条）
 	resultCache *lru.Cache[string, []Photo]   // 搜索结果缓存（LRU，限制500条）
+	logger      *zap.Logger
 }
 
 // Photo 照片信息
@@ -36,6 +40,7 @@ type Photo struct {
 	Height      int      `json:"height,omitempty"`
 	CameraMake  string   `json:"camera_make,omitempty"`
 	CameraModel string   `json:"camera_model,omitempty"`
+	Embedding   []float32 `json:"embedding,omitempty"`
 }
 
 // SearchResult 搜索结果
@@ -62,6 +67,7 @@ func New() *Index {
 		photos:      make([]Photo, 0),
 		queryCache:  queryCache,
 		resultCache: resultCache,
+		logger:      zap.NewNop(),
 	}
 }
 
@@ -75,7 +81,13 @@ func NewWithML(mlClient *internal.MLClient, vectorIndex *internal.VectorIndex) *
 		vectorIndex:  vectorIndex,
 		queryCache:   queryCache,
 		resultCache:  resultCache,
+		logger:       zap.NewNop(),
 	}
+}
+
+// SetLogger 设置 logger
+func (idx *Index) SetLogger(l *zap.Logger) {
+	idx.logger = l
 }
 
 // Search 搜索照片
@@ -85,8 +97,8 @@ func (idx *Index) Search(query interface{}, limit int) ([]Photo, error) {
 		return idx.semanticSearch(query, limit)
 	}
 
-	// 否则使用简单的关键词匹配
-	return idx.keywordSearch(query, limit)
+	// 否则使用内存余弦相似度回退（从 SQLite 加载的 embedding）
+	return idx.bruteForceSearchFallback(query, limit)
 }
 
 // semanticSearch 语义搜索：编码查询文本，搜索向量索引
@@ -102,25 +114,25 @@ func (idx *Index) semanticSearch(query interface{}, limit int) ([]Photo, error) 
 	idx.mu.RLock()
 	if cached, found := idx.resultCache.Get(cacheKey); found {
 		idx.mu.RUnlock()
-		fmt.Printf("命中结果缓存: %s\n", queryStr)
+		idx.logger.Debug("命中结果缓存", zap.String("query", queryStr))
 		return cached, nil
 	}
 	idx.mu.RUnlock()
 
-	fmt.Printf("语义搜索: %s\n", queryStr)
+	idx.logger.Info("语义搜索", zap.String("query", queryStr))
 
 	// 检查缓存
 	var queryEmbedding []float32
 	if cached, found := idx.queryCache.Get(queryStr); found {
 		queryEmbedding = cached
-		fmt.Printf("使用缓存的查询向量\n")
+		idx.logger.Debug("使用缓存的查询向量", zap.String("query", queryStr))
 	} else {
 		// 编码查询文本
 		var err error
 		queryEmbedding, err = idx.mlClient.EncodeText(queryStr)
 		if err != nil {
-			fmt.Printf("文本编码失败，回退到关键词搜索: %v\n", err)
-			return idx.keywordSearch(query, limit)
+			idx.logger.Error("文本编码失败，回退到暴力搜索", zap.Error(err))
+			return idx.bruteForceSearchFallback(query, limit)
 		}
 		// 存入缓存
 		idx.queryCache.Add(queryStr, queryEmbedding)
@@ -128,6 +140,17 @@ func (idx *Index) semanticSearch(query interface{}, limit int) ([]Photo, error) 
 
 	// 在向量索引中搜索
 	results := idx.vectorIndex.SearchByEmbedding(queryEmbedding, limit)
+
+	// 过滤低相似度结果（最低 0.35 分）
+	minScore := float32(0.35)
+	n := 0
+	for _, r := range results {
+		if r.Score >= minScore {
+			results[n] = r
+			n++
+		}
+	}
+	results = results[:n]
 
 	// 将搜索结果转换为 Photo 列表
 	idx.mu.RLock()
@@ -154,7 +177,7 @@ func (idx *Index) semanticSearch(query interface{}, limit int) ([]Photo, error) 
 	}
 	idx.mu.RUnlock()
 
-	fmt.Printf("语义搜索完成，找到 %d 个结果\n", len(photos))
+	idx.logger.Info("语义搜索完成", zap.Int("results", len(photos)))
 
 	// 缓存结果
 	idx.mu.Lock()
@@ -189,6 +212,90 @@ func (idx *Index) keywordSearch(query interface{}, limit int) ([]Photo, error) {
 	return results, nil
 }
 
+// bruteForceSearchFallback 暴力余弦相似度搜索（Milvus 不可用时的回退）
+// 从 SQLite 加载的 embedding 已填充到 idx.photos 中
+func (idx *Index) bruteForceSearchFallback(query interface{}, limit int) ([]Photo, error) {
+	queryStr, ok := query.(string)
+	if !ok {
+		return nil, fmt.Errorf("查询参数类型错误")
+	}
+
+	if idx.mlClient == nil {
+		return nil, fmt.Errorf("ML 客户端不可用，无法进行向量搜索")
+	}
+
+	// 编码查询文本
+	queryEmbedding, err := idx.mlClient.EncodeText(queryStr)
+	if err != nil {
+		return nil, fmt.Errorf("文本编码失败: %w", err)
+	}
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	// 收集所有带有 embedding 的照片
+	var candidates []Photo
+	for _, p := range idx.photos {
+		if len(p.Embedding) > 0 {
+			candidates = append(candidates, p)
+		}
+	}
+
+	if len(candidates) == 0 {
+		idx.logger.Warn("没有照片包含 embedding，无法进行暴力搜索")
+		return []Photo{}, nil
+	}
+
+	// 计算余弦相似度并排序
+	type scoredPhoto struct {
+		photo Photo
+		score float32
+	}
+	scored := make([]scoredPhoto, 0, len(candidates))
+	for _, p := range candidates {
+		score := cosineSimilarity(queryEmbedding, p.Embedding)
+		if score >= 0.35 { // 最低相似度阈值
+			scored = append(scored, scoredPhoto{photo: p, score: score})
+		}
+	}
+
+	// 按相似度降序排序
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	// 取 top-k
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+
+	results := make([]Photo, 0, len(scored))
+	for _, s := range scored {
+		s.photo.Score = s.score
+		results = append(results, s.photo)
+	}
+
+	idx.logger.Info("暴力向量搜索完成", zap.Int("candidates", len(candidates)), zap.Int("results", len(results)))
+	return results, nil
+}
+
+// cosineSimilarity 计算两个 float32 向量的余弦相似度
+func cosineSimilarity(a, b []float32) float32 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var dot, normA, normB float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return float32(dot / (math.Sqrt(normA) * math.Sqrt(normB)))
+}
+
 // Chat AI对话
 func (idx *Index) Chat(message string) (string, error) {
 	if idx.mlClient == nil {
@@ -202,13 +309,13 @@ func (idx *Index) ListPhotos(page, limit int) ([]Photo, int, error) {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
-	fmt.Printf("ListPhotos: page=%d, limit=%d, total_photos=%d\n", page, limit, len(idx.photos))
+	idx.logger.Info("ListPhotos", zap.Int("page", page), zap.Int("limit", limit), zap.Int("total_photos", len(idx.photos)))
 
 	start := (page - 1) * limit
 	end := start + limit
 
 	if start >= len(idx.photos) {
-		fmt.Printf("ListPhotos: start=%d >= len=%d, returning empty\n", start, len(idx.photos))
+		idx.logger.Info("ListPhotos: start >= len, returning empty", zap.Int("start", start), zap.Int("len", len(idx.photos)))
 		return []Photo{}, len(idx.photos), nil
 	}
 	if end > len(idx.photos) {
@@ -216,7 +323,7 @@ func (idx *Index) ListPhotos(page, limit int) ([]Photo, int, error) {
 	}
 
 	result := idx.photos[start:end]
-	fmt.Printf("ListPhotos: returning %d photos (start=%d, end=%d)\n", len(result), start, end)
+	idx.logger.Info("ListPhotos: returning photos", zap.Int("count", len(result)), zap.Int("start", start), zap.Int("end", end))
 	return result, len(idx.photos), nil
 }
 
@@ -285,7 +392,7 @@ func (idx *Index) UpdatePhotos(paths []string) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	fmt.Printf("UpdatePhotos called with %d paths\n", len(paths))
+	idx.logger.Info("UpdatePhotos called", zap.Int("paths", len(paths)))
 	photos := make([]Photo, 0, len(paths))
 	for i, path := range paths {
 		photos = append(photos, Photo{
@@ -297,7 +404,7 @@ func (idx *Index) UpdatePhotos(paths []string) {
 		})
 	}
 	idx.photos = photos
-	fmt.Printf("Updated photos count: %d\n", len(idx.photos))
+	idx.logger.Info("Updated photos count", zap.Int("count", len(idx.photos)))
 }
 
 // UpdatePhotosMeta 更新带完整元数据的照片列表
@@ -305,9 +412,36 @@ func (idx *Index) UpdatePhotosMeta(photos []Photo) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	fmt.Printf("UpdatePhotosMeta called with %d photos\n", len(photos))
+	idx.logger.Info("UpdatePhotosMeta called", zap.Int("photos", len(photos)))
 	idx.photos = photos
-	fmt.Printf("Updated photos count: %d\n", len(idx.photos))
+	idx.logger.Info("Updated photos count", zap.Int("count", len(idx.photos)))
+}
+
+// MergePhotos 合并照片到现有索引（不替换已有照片，更新或追加新照片）
+func (idx *Index) MergePhotos(newPhotos []Photo) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	// 创建路径到照片的映射
+	existingMap := make(map[string]int) // path -> index
+	for i, p := range idx.photos {
+		existingMap[p.Path] = i
+	}
+
+	merged := 0
+	added := 0
+	for _, p := range newPhotos {
+		if i, ok := existingMap[p.Path]; ok {
+			// 更新已有照片
+			idx.photos[i] = p
+			merged++
+		} else {
+			// 追加新照片
+			idx.photos = append(idx.photos, p)
+			added++
+		}
+	}
+	idx.logger.Info("MergePhotos", zap.Int("merged", merged), zap.Int("added", added), zap.Int("total", len(idx.photos)))
 }
 
 // BatchUpdateTagsByPaths 按路径批量更新照片标签（用于 ML 分类结果回写）
@@ -322,7 +456,7 @@ func (idx *Index) BatchUpdateTagsByPaths(updates map[string][]string) {
 			updated++
 		}
 	}
-	fmt.Printf("BatchUpdateTagsByPaths: updated %d photos\n", updated)
+	idx.logger.Info("BatchUpdateTagsByPaths", zap.Int("updated", updated))
 	idx.saveTagsToFile()
 }
 
@@ -335,11 +469,11 @@ func (idx *Index) saveTagsToFile() {
 	}
 	data, err := json.Marshal(tagMap)
 	if err != nil {
-		fmt.Printf("saveTagsToFile marshal error: %v\n", err)
+		idx.logger.Error("saveTagsToFile marshal error", zap.Error(err))
 		return
 	}
 	if err := os.WriteFile("photo_tags.json", data, 0644); err != nil {
-		fmt.Printf("saveTagsToFile write error: %v\n", err)
+		idx.logger.Error("saveTagsToFile write error", zap.Error(err))
 	}
 }
 
@@ -351,13 +485,13 @@ func (idx *Index) LoadTagsFromFile() {
 	data, err := os.ReadFile("photo_tags.json")
 	if err != nil {
 		if !os.IsNotExist(err) {
-			fmt.Printf("LoadTagsFromFile read error: %v\n", err)
+			idx.logger.Error("LoadTagsFromFile read error", zap.Error(err))
 		}
 		return
 	}
 	var tagMap map[string][]string
 	if err := json.Unmarshal(data, &tagMap); err != nil {
-		fmt.Printf("LoadTagsFromFile unmarshal error: %v\n", err)
+		idx.logger.Error("LoadTagsFromFile unmarshal error", zap.Error(err))
 		return
 	}
 	updated := 0
@@ -367,7 +501,7 @@ func (idx *Index) LoadTagsFromFile() {
 			updated++
 		}
 	}
-	fmt.Printf("LoadTagsFromFile: restored tags for %d photos\n", updated)
+	idx.logger.Info("LoadTagsFromFile", zap.Int("restored", updated))
 }
 
 // RebuildTags 根据照片路径重新生成标签（基于公共目录前缀）
@@ -390,7 +524,7 @@ func (idx *Index) RebuildTags() {
 		idx.photos[i].Tags = tags
 		updated++
 	}
-	fmt.Printf("RebuildTags: updated %d photos\n", updated)
+	idx.logger.Info("RebuildTags", zap.Int("updated", updated))
 }
 
 // UpdatePhotoDateTime 更新单张照片的日期时间
@@ -426,7 +560,7 @@ func (idx *Index) RebuildTagsForEmpty() {
 			updated++
 		}
 	}
-	fmt.Printf("RebuildTagsForEmpty: updated %d photos\n", updated)
+	idx.logger.Info("RebuildTagsForEmpty", zap.Int("updated", updated))
 }
 
 // ListDirs 获取所有已扫描的目录（从照片路径中提取）

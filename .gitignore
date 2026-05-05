@@ -54,6 +54,9 @@ data/
 ml-service/data/
 ml-service/models/
 
+# Build binary
+main
+
 # Temporary files
 tmp/
 temp/

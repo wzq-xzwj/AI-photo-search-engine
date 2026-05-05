@@ -12,17 +12,19 @@ import (
 	"go.uber.org/zap"
 )
 
-// Face 人脸信息
+// Face 人脸信息 (第一阶段优化)
 type Face struct {
-	ID         string    `json:"id"`
-	PhotoID    string    `json:"photo_id"`
-	FaceIndex  int       `json:"face_index"`
-	PersonID   *string   `json:"person_id,omitempty"`
-	PersonName *string   `json:"person_name,omitempty"`
-	Location   Location  `json:"location"`
-	Thumbnail  string    `json:"thumbnail,omitempty"`
-	Confidence float64   `json:"confidence"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID                     string    `json:"id"`
+	PhotoID                string    `json:"photo_id"`
+	FaceIndex              int       `json:"face_index"`
+	PersonID               *string   `json:"person_id,omitempty"`
+	PersonName             *string   `json:"person_name,omitempty"`
+	Location               Location  `json:"location"`
+	Thumbnail              string    `json:"thumbnail,omitempty"`
+	Confidence             float64   `json:"confidence"`              // 检测置信度
+	RecognitionConfidence  *float64  `json:"recognition_confidence,omitempty"`  // 识别置信度
+	IsUnknown              bool      `json:"is_unknown"`              // Unknown标记
+	CreatedAt              time.Time `json:"created_at"`
 }
 
 // Location 人脸位置
@@ -66,16 +68,22 @@ func (s *FaceService) DetectFaces(photoID string, imagePath string) ([]Face, err
 	return nil, fmt.Errorf("not implemented")
 }
 
-// GetFacesByPhoto 获取照片的人脸列表
-func (s *FaceService) GetFacesByPhoto(photoID string) ([]Face, error) {
+// GetFacesByPhoto 获取照片的人脸列表 (支持Unknown过滤)
+func (s *FaceService) GetFacesByPhoto(photoID string, includeUnknown bool) ([]Face, error) {
 	query := `
 		SELECT f.id, f.photo_id, f.face_index, f.person_id, p.name,
-		       f.location, f.thumbnail, f.confidence, f.created_at
+		       f.location, f.thumbnail, f.confidence, f.recognition_confidence, f.is_unknown, f.created_at
 		FROM faces f
 		LEFT JOIN persons p ON f.person_id = p.id
 		WHERE f.photo_id = ?
-		ORDER BY f.face_index
 	`
+	
+	// 如果不包含Unknown，添加过滤条件
+	if !includeUnknown {
+		query += ` AND f.is_unknown = FALSE`
+	}
+	
+	query += ` ORDER BY f.face_index`
 
 	rows, err := s.db.Query(query, photoID)
 	if err != nil {
@@ -88,12 +96,14 @@ func (s *FaceService) GetFacesByPhoto(photoID string) ([]Face, error) {
 		var face Face
 		var locationJSON string
 		var personName sql.NullString
+		var recConfidence sql.NullFloat64
 
 		err := rows.Scan(
 			&face.ID, &face.PhotoID, &face.FaceIndex,
 			&face.PersonID, &personName,
 			&locationJSON, &face.Thumbnail,
-			&face.Confidence, &face.CreatedAt,
+			&face.Confidence, &recConfidence, &face.IsUnknown,
+			&face.CreatedAt,
 		)
 		if err != nil {
 			s.logger.Error("scan face failed", zap.Error(err))
@@ -102,6 +112,10 @@ func (s *FaceService) GetFacesByPhoto(photoID string) ([]Face, error) {
 
 		if personName.Valid {
 			face.PersonName = &personName.String
+		}
+		
+		if recConfidence.Valid {
+			face.RecognitionConfidence = &recConfidence.Float64
 		}
 
 		// 解析位置 JSON
@@ -113,7 +127,7 @@ func (s *FaceService) GetFacesByPhoto(photoID string) ([]Face, error) {
 	return faces, nil
 }
 
-// LabelFace 标注人脸
+// LabelFace 标注人脸 (支持Unknown标记清除)
 func (s *FaceService) LabelFace(faceID string, personName string) (*Person, error) {
 	// 查找或创建人物
 	personID, err := s.findOrCreatePerson(personName)
@@ -121,15 +135,38 @@ func (s *FaceService) LabelFace(faceID string, personName string) (*Person, erro
 		return nil, err
 	}
 
-	// 更新人脸的人物关联
-	query := `UPDATE faces SET person_id = ?, updated_at = ? WHERE id = ?`
+	// 更新人脸的人物关联 (清除Unknown标记)
+	query := `UPDATE faces SET person_id = ?, is_unknown = FALSE, updated_at = ? WHERE id = ?`
 	_, err = s.db.Exec(query, personID, time.Now(), faceID)
 	if err != nil {
 		return nil, err
 	}
 
+	// 更新人物统计
+	s.updatePersonStats(personID)
+
 	// 返回人物信息
 	return s.GetPerson(personID)
+}
+
+// MarkAsUnknown 标记人脸为Unknown (人工审核用)
+func (s *FaceService) MarkAsUnknown(faceID string) error {
+	query := `UPDATE faces SET person_id = NULL, is_unknown = TRUE, updated_at = ? WHERE id = ?`
+	_, err := s.db.Exec(query, time.Now(), faceID)
+	return err
+}
+
+// updatePersonStats 更新人物统计信息
+func (s *FaceService) updatePersonStats(personID string) error {
+	query := `
+		UPDATE persons 
+		SET face_count = (SELECT COUNT(*) FROM faces WHERE person_id = ?),
+		    photo_count = (SELECT COUNT(DISTINCT photo_id) FROM faces WHERE person_id = ?),
+		    updated_at = ?
+		WHERE id = ?
+	`
+	_, err := s.db.Exec(query, personID, personID, time.Now(), personID)
+	return err
 }
 
 // findOrCreatePerson 查找或创建人物

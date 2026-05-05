@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import SearchBar from '../components/SearchBar'
 import PhotoGrid from '../components/PhotoGrid'
@@ -7,6 +7,14 @@ interface SearchResult {
   PhotoID: string
   Score: number
   PhotoPath: string
+  path?: string
+  name?: string
+  date_time?: string
+  tags?: string[]
+  width?: number
+  height?: number
+  camera_make?: string
+  camera_model?: string
 }
 
 type Period = 'all' | 'week' | 'month' | 'year'
@@ -34,6 +42,8 @@ export default function Search({ selectedDir }: SearchProps) {
   const [isSearching, setIsSearching] = useState(false)
   const [results, setResults] = useState<SearchResult[]>([])
   const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const PAGE_SIZE = 40
 
   useEffect(() => {
     const q = searchParams.get('q')
@@ -43,30 +53,30 @@ export default function Search({ selectedDir }: SearchProps) {
       setSearchQuery(q)
       setPeriod(p)
       setSelectedTags(t)
-      performSearch(q, p, t, selectedDir)
+      setPage(1)
+      performSearch(q, p, t, selectedDir, 1)
     }
   }, [searchParams, selectedDir])
 
-  const performSearch = async (query: string, searchPeriod: Period, tags: string[], dir: string) => {
-    setIsSearching(true)
+  const performSearch = async (query: string, searchPeriod: Period, tags: string[], dir: string, targetPage: number, append = false) => {
+    setIsSearching(!append)
     try {
       const params = new URLSearchParams()
       params.append('q', query)
       params.append('period', searchPeriod)
-      if (tags.length > 0) {
-        params.append('tags', tags.join(','))
-      }
-      if (dir) {
-        params.append('dir', dir)
-      }
+      params.append('page', String(targetPage))
+      params.append('page_size', String(PAGE_SIZE))
+      if (tags.length > 0) params.append('tags', tags.join(','))
+      if (dir) params.append('dir', dir)
+
       const response = await fetch(`/api/v1/search?${params.toString()}`)
       const data = await response.json()
-      setResults(data.results || [])
+      const newResults = data.results || []
+      setResults(prev => append ? [...prev, ...newResults] : newResults)
       setTotal(data.total || 0)
+      setPage(targetPage)
     } catch (error) {
       console.error('Search failed:', error)
-      setResults([])
-      setTotal(0)
     } finally {
       setIsSearching(false)
     }
@@ -85,43 +95,44 @@ export default function Search({ selectedDir }: SearchProps) {
 
   const handlePeriodChange = (p: Period) => {
     setPeriod(p)
-    if (searchQuery) {
-      updateSearchParams(searchQuery, p, selectedTags)
-    }
+    if (searchQuery) updateSearchParams(searchQuery, p, selectedTags)
   }
 
   const toggleTag = (tag: string) => {
     const next = selectedTags.includes(tag)
-      ? selectedTags.filter((t) => t !== tag)
+      ? selectedTags.filter(t => t !== tag)
       : [...selectedTags, tag]
     setSelectedTags(next)
-    if (searchQuery) {
-      updateSearchParams(searchQuery, period, next)
-    }
+    if (searchQuery) updateSearchParams(searchQuery, period, next)
   }
+
+  const hasMore = results.length < total
+
+  const handleLoadMore = useCallback(() => {
+    if (!hasMore || isSearching) return
+    performSearch(searchQuery, period, selectedTags, selectedDir, page + 1, true)
+  }, [hasMore, isSearching, searchQuery, period, selectedTags, selectedDir, page])
 
   const hasFilters = period !== 'all' || selectedTags.length > 0
 
   return (
     <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      {/* Search Header */}
-      <div className="mb-8">
+      <div className="mb-6">
         <div className="max-w-3xl mx-auto">
           <SearchBar onSearch={handleSearch} placeholder="搜索照片..." />
         </div>
 
-        {/* Filters */}
         {searchQuery && (
           <div className="mt-4 space-y-3">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-gray-400 dark:text-dark-muted mr-1">时间:</span>
-              {(Object.keys(PERIOD_LABELS) as Period[]).map((p) => (
+              <span className="text-xs text-gray-400 mr-1">时间:</span>
+              {(Object.keys(PERIOD_LABELS) as Period[]).map(p => (
                 <button
                   key={p}
                   onClick={() => handlePeriodChange(p)}
                   className={`px-3 py-1.5 text-xs rounded-full font-medium transition-colors ${
                     period === p
-                      ? 'bg-primary-500 text-white'
+                      ? 'bg-purple-500 text-white'
                       : 'bg-gray-100 dark:bg-dark-surface text-gray-600 dark:text-dark-muted hover:bg-gray-200 dark:hover:bg-dark-card'
                   }`}
                 >
@@ -136,8 +147,8 @@ export default function Search({ selectedDir }: SearchProps) {
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs text-gray-400 dark:text-dark-muted mr-1">标签:</span>
-              {HOT_TAGS.map((tag) => (
+              <span className="text-xs text-gray-400 mr-1">标签:</span>
+              {HOT_TAGS.map(tag => (
                 <button
                   key={tag}
                   onClick={() => toggleTag(tag)}
@@ -152,11 +163,7 @@ export default function Search({ selectedDir }: SearchProps) {
               ))}
               {hasFilters && (
                 <button
-                  onClick={() => {
-                    setPeriod('all')
-                    setSelectedTags([])
-                    if (searchQuery) updateSearchParams(searchQuery, 'all', [])
-                  }}
+                  onClick={() => { setPeriod('all'); setSelectedTags([]); if (searchQuery) updateSearchParams(searchQuery, 'all', []) }}
                   className="px-3 py-1.5 text-xs rounded-full text-gray-400 hover:text-gray-600 dark:hover:text-dark-text underline"
                 >
                   清除筛选
@@ -164,45 +171,36 @@ export default function Search({ selectedDir }: SearchProps) {
               )}
             </div>
 
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-xl font-display font-semibold text-gray-900 dark:text-dark-text">
-                  搜索结果："{searchQuery}"
-                </h2>
-                <p className="text-sm text-gray-500 dark:text-dark-muted mt-1">
-                  {isSearching ? (
-                    <span className="flex items-center gap-2">
-                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                      </svg>
-                      正在搜索...
-                    </span>
-                  ) : `找到 ${total} 张相关照片`}
-                </p>
-              </div>
+            <div>
+              <h2 className="text-lg font-display font-semibold text-gray-900 dark:text-white">
+                「{searchQuery}」
+              </h2>
+              <p className="text-sm text-gray-500 dark:text-dark-muted mt-0.5">
+                {total > 0 ? `找到 ${total} 张照片` : '搜索中…'}
+              </p>
             </div>
           </div>
         )}
       </div>
 
-      {/* Photo Grid */}
       <PhotoGrid
-        loading={isSearching}
+        loading={isSearching && results.length === 0}
         dir={selectedDir}
-        photos={results.map((r) => {
-          const photoPath = (r as any).path || r.PhotoPath
+        hasMore={hasMore}
+        onLoadMore={handleLoadMore}
+        photos={results.map(r => {
+          const photoPath = r.path || r.PhotoPath
           return {
             id: r.PhotoID,
             url: `/api/v1/photos/file?path=${encodeURIComponent(photoPath)}`,
             thumbnail: `/api/v1/photos/file?path=${encodeURIComponent(photoPath)}`,
-            title: (r as any).name || r.PhotoID,
-            date: (r as any).date_time || '',
-            tags: (r as any).tags || ['搜索结果'],
-            width: (r as any).width || 0,
-            height: (r as any).height || 0,
-            cameraMake: (r as any).camera_make || '',
-            cameraModel: (r as any).camera_model || '',
+            title: r.name || r.PhotoID,
+            date: r.date_time || '',
+            tags: r.tags || [],
+            width: r.width || 0,
+            height: r.height || 0,
+            cameraMake: r.camera_make || '',
+            cameraModel: r.camera_model || '',
           }
         })}
       />

@@ -10,9 +10,10 @@ import (
 
 // ParsedQuery 解析后的查询结构
 type ParsedQuery struct {
-	Query       string   `json:"query"`
-	TimeMarkers []string `json:"time_markers"`
-	Tags        string   `json:"tags"`
+	Query          string   `json:"query"`
+	TimeMarkers    []string `json:"time_markers"`
+	Tags           string   `json:"tags"`
+	RequireAllTags bool     `json:"require_all"`
 }
 
 // ParseNaturalLanguage 使用 LLM 解析自然语言查询（OpenAI 兼容协议）
@@ -38,49 +39,7 @@ func ParseNaturalLanguage(client LLMClient, userQuery string) (*ParsedQuery, err
 }
 
 func buildPrompt(query string) string {
-	return fmt.Sprintf(`你是一个照片搜索查询解析助手。请将用户的自然语言查询解析为结构化 JSON。
-
-用户查询："%s"
-
-请只输出一个 JSON 对象，包含以下字段：
-- query: 清洗后的核心搜索词（用于语义搜索），保留地点、人物、事件、物体等关键信息，去掉时间修饰语。对于语义相近的词，请扩展为更通用的表达以提高搜索命中率。例如："人像"→"人"、"孩童"→"小孩 儿童"、"车辆"→"车 汽车"
-- time_markers: 时间关键词数组，如 ["去年","夏天"]。如果没有时间限定则空数组 []
-- tags: 可能的标签过滤条件，用逗号分隔，没有则空字符串
-
-语义扩展示例：
-- "人像" → {"query":"人","time_markers":[],"tags":"人像,人物,人脸"}
-- "孩童在公园玩" → {"query":"小孩 儿童 公园 玩","time_markers":[],"tags":"小孩,公园"}
-- "车辆照片" → {"query":"车 汽车","time_markers":[],"tags":"车辆,汽车"}
-
-时间关键词定义：
-- "去年" = 上一个自然年
-- "今年" = 当前自然年
-- "上个月" = 上一个自然月
-- "上周" = 上一个自然周（周一至周日）
-- "夏天" = 6月1日至8月31日
-- "冬天" = 12月1日至次年2月28日
-- "春天" = 3月1日至5月31日
-- "秋天" = 9月1日至11月30日
-- "元旦" = 1月1日
-- "春节" = 1月或2月（可只标记"春节"，不用推算具体日期）
-
-示例：
-输入："去年夏天在故宫拍的照片"
-输出：{"query":"故宫","time_markers":["去年","夏天"],"tags":""}
-
-输入："找我和朋友在餐厅聚餐的照片"
-输出：{"query":"餐厅 聚餐 朋友","time_markers":[],"tags":"餐厅,聚餐"}
-
-输入："2025年元旦在北京的照片"
-输出：{"query":"北京","time_markers":["2025年","元旦"],"tags":""}
-
-输入："2024年拍的照片"
-输出：{"query":"","time_markers":["2024年"],"tags":""}
-
-输入："上个月在香港的照片"
-输出：{"query":"香港","time_markers":["上个月"],"tags":""}
-
-只输出 JSON，不要任何解释。`, query)
+	return fmt.Sprintf("你是照片搜索查询解析器。解析用户查询为 JSON。\n\n查询：\"%s\"\n\n输出字段：\n- query: 核心搜索词（用于语义搜索），复合查询保留原始意图\n- time_markers: 时间词数组，无则 []\n- tags: 用逗号分隔的过滤条件（用最简短的概念词，不是具体标签名）\n- require_all: 布尔值，多个条件是否需要同时满足\n\n【关键规则 - tags 必须用最简短的概念词】\n1. 花→\"花\" 人像→\"人像\" 狗→\"狗\" 猫→\"猫\" 雪→\"雪\" 海→\"海\" 日落→\"日落\" 夜景→\"夜景\" 城市→\"城市\" 建筑→\"建筑\" 飞机→\"飞机\" 车→\"车\" 美食→\"美食\" 动物→\"动物\" 山→\"山\"\n2. 复合查询（带X的Y、有X的Y、X中的Y、X里的Y）→ require_all=true，每个概念一个简短词\n   例：\"带花的人像\" → tags:\"花,人像\" require_all:true\n   例：\"雪地里的狗狗\" → tags:\"雪,狗\" require_all:true\n   例：\"有飞机的天空\" → tags:\"飞机,天空\" require_all:true\n3. 并列查询（海边日落、城市夜景等非\"带/有/中的\"）→ require_all=false\n   例：\"海边日落\" → tags:\"海,日落\" require_all:false\n   例：\"城市夜景\" → tags:\"城市,夜景\" require_all:false\n4. 单一概念 → tags单个简短词或空，require_all=false\n   例：\"花\" → tags:\"花\" require_all:false\n   例：\"故宫\" → tags:\"\" require_all:false\n\n时间词：去年/今年/上个月/上周/夏天/冬天/春天/秋天/元旦/春节\n\n示例输出：\n\"带花的人像\" → {\"query\":\"带花的人像\",\"time_markers\":[],\"tags\":\"花,人像\",\"require_all\":true}\n\"去年夏天的故宫\" → {\"query\":\"故宫\",\"time_markers\":[\"去年\",\"夏天\"],\"tags\":\"\",\"require_all\":false}\n\"海边日落\" → {\"query\":\"海边日落\",\"time_markers\":[],\"tags\":\"海,日落\",\"require_all\":false}\n\"雪地里的狗狗\" → {\"query\":\"雪地里的狗狗\",\"time_markers\":[],\"tags\":\"雪,狗\",\"require_all\":true}\n\n只输出 JSON，不要任何解释。", query)
 }
 
 func extractJSON(text string) (*ParsedQuery, error) {

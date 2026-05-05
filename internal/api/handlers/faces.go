@@ -305,7 +305,68 @@ func (h *FaceHandler) HandleSearchByPerson(c *gin.Context) {
 	})
 }
 
-// HandleGetFaceThumbnail 获取人脸缩略图（从原图实时裁剪）
+// HandleGetUnknownFaces 获取Unknown状态的人脸列表 (人工审核用)
+func (h *FaceHandler) HandleGetUnknownFaces(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not available"})
+		return
+	}
+
+	limitStr := c.DefaultQuery("limit", "50")
+	offsetStr := c.DefaultQuery("offset", "0")
+
+	limit, _ := strconv.Atoi(limitStr)
+	offset, _ := strconv.Atoi(offsetStr)
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	// 查询Unknown人脸
+	faces, total, err := h.db.GetUnknownFaces(limit, offset)
+	if err != nil {
+		h.logger.Error("Failed to get unknown faces", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get unknown faces"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": gin.H{
+			"faces": faces,
+			"total": total,
+		},
+	})
+}
+
+// HandleMarkUnknown 标记人脸为Unknown
+func (h *FaceHandler) HandleMarkUnknown(c *gin.Context) {
+	if h.db == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database not available"})
+		return
+	}
+
+	faceIDStr := c.Param("id")
+	faceID, err := strconv.Atoi(faceIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid face ID"})
+		return
+	}
+
+	// 更新为Unknown状态
+	if err := h.db.UpdateFaceUnknownStatus(faceID, true); err != nil {
+		h.logger.Error("Failed to mark face as unknown", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark unknown"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code": 200,
+		"data": gin.H{
+			"face_id":    faceID,
+			"is_unknown": true,
+		},
+	})
+}
 func (h *FaceHandler) HandleGetFaceThumbnail(c *gin.Context) {
 	// 优先用 face_id
 	faceIDStr := c.Query("face_id")

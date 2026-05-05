@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,10 +22,18 @@ const (
 	EmbeddingDim = 512
 )
 
+const (
+	healthCheckCacheSecs = 30
+	maxRetries           = 2
+	retryInterval        = 500 * time.Millisecond
+)
+
 // MLClient ML 服务 HTTP 客户端
 type MLClient struct {
 	baseURL    string
 	httpClient *http.Client
+	healthy    atomic.Bool  // ML 服务是否可用
+	lastCheck  atomic.Int64 // 上次健康检查时间(unix秒)
 }
 
 // NewMLClient 创建新的 ML 客户端（带连接池）
@@ -54,13 +63,15 @@ func NewMLClient(baseURL string) *MLClient {
 		ForceAttemptHTTP2: true,
 	}
 
-	return &MLClient{
+	c := &MLClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   60 * time.Second, // 增加超时以支持批量请求
 		},
 	}
+	c.healthy.Store(true)
+	return c
 }
 
 // EmbeddingResponse ML 服务返回的嵌入向量
@@ -83,6 +94,45 @@ type ClassifyBatchResponse struct {
 // TextEmbedRequest 文本编码请求
 type TextEmbedRequest struct {
 	Text string `json:"text"`
+}
+
+// IsHealthy 检查 ML 服务是否可用（带30秒缓存）
+func (c *MLClient) IsHealthy() bool {
+	now := time.Now().Unix()
+	last := c.lastCheck.Load()
+	if now-last < healthCheckCacheSecs {
+		return c.healthy.Load()
+	}
+	// 尝试更新缓存时间（简单竞争避免多次同时检查）
+	if !c.lastCheck.CompareAndSwap(last, now) {
+		return c.healthy.Load()
+	}
+	err := c.HealthCheck()
+	return err == nil
+}
+
+func (c *MLClient) doWithRetry(req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for i := 0; i <= maxRetries; i++ {
+		if i > 0 {
+			time.Sleep(retryInterval)
+		}
+		resp, err := c.httpClient.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		// 克隆请求体用于重试
+		if req.Body != nil && req.GetBody != nil {
+			newBody, err := req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			req.Body = newBody
+		}
+	}
+	c.healthy.Store(false)
+	return nil, lastErr
 }
 
 // ExtractImageEmbedding 调用 ML 服务提取图像特征
@@ -125,8 +175,12 @@ func (c *MLClient) ExtractImageEmbedding(imagePath string) ([]float32, error) {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	// 支持重试时重新读取 body
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body.Bytes())), nil
+	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("调用 ML 服务失败: %w", err)
 	}
@@ -163,8 +217,11 @@ func (c *MLClient) EncodeText(text string) ([]float32, error) {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewBuffer(jsonData)), nil
+	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("调用 ML 服务失败: %w", err)
 	}
@@ -227,8 +284,11 @@ func (c *MLClient) ClassifyBatch(imagePaths []string, topK int) ([][]Classificat
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body.Bytes())), nil
+	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("调用 ML 服务失败: %w", err)
 	}
@@ -300,8 +360,11 @@ func (c *MLClient) SimilarityBatch(imagePaths []string, labels []string, topK in
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body.Bytes())), nil
+	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("调用 ML 服务失败: %w", err)
 	}
@@ -319,18 +382,97 @@ func (c *MLClient) SimilarityBatch(imagePaths []string, labels []string, topK in
 	return result.Results, nil
 }
 
+// SimilarityBatchV2Response v2 similarity response (same format as v1)
+type SimilarityBatchV2Response struct {
+	Results [][]ClassificationItem `json:"results"`
+}
+
+// SimilarityBatchV2 使用 V2 分类器（Prompt模板 + 阈值过滤）批量计算相似度
+func (c *MLClient) SimilarityBatchV2(imagePaths []string, labels []string, topK int, minScore float64) ([][]ClassificationItem, error) {
+	if len(imagePaths) == 0 {
+		return nil, nil
+	}
+	if len(labels) == 0 {
+		return nil, fmt.Errorf("labels cannot be empty")
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	for _, imagePath := range imagePaths {
+		file, err := os.Open(imagePath)
+		if err != nil {
+			return nil, fmt.Errorf("打开图片文件失败: %w", err)
+		}
+		defer file.Close()
+
+		ext := filepath.Ext(imagePath)
+		mimeType := mime.TypeByExtension(ext)
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
+
+		h := make(map[string][]string)
+		h["Content-Disposition"] = []string{fmt.Sprintf(`form-data; name="files"; filename="%s"`, filepath.Base(imagePath))}
+		h["Content-Type"] = []string{mimeType}
+		part, err := writer.CreatePart(textproto.MIMEHeader(h))
+		if err != nil {
+			return nil, fmt.Errorf("创建 form 文件失败: %w", err)
+		}
+		if _, err := io.Copy(part, file); err != nil {
+			return nil, fmt.Errorf("复制文件内容失败: %w", err)
+		}
+	}
+
+	labelsJSON, _ := json.Marshal(labels)
+	writer.WriteField("labels", string(labelsJSON))
+	writer.WriteField("top_k", strconv.Itoa(topK))
+	writer.WriteField("min_score", strconv.FormatFloat(minScore, 'f', 2, 64))
+	writer.Close()
+
+	url := fmt.Sprintf("%s/api/v1/similarity/batch/v2", c.baseURL)
+	req, err := http.NewRequest("POST", url, &body)
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body.Bytes())), nil
+	}
+
+	resp, err := c.doWithRetry(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 ML v2 服务失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ML v2 服务返回错误 %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result SimilarityBatchV2Response
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("解析 ML v2 响应失败: %w", err)
+	}
+	return result.Results, nil
+}
+
 // HealthCheck 检查 ML 服务是否可用
 func (c *MLClient) HealthCheck() error {
 	url := fmt.Sprintf("%s/api/v1/health", c.baseURL)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {
+		c.healthy.Store(false)
 		return fmt.Errorf("ML 服务不可达: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		c.healthy.Store(false)
 		return fmt.Errorf("ML 服务状态异常: %d", resp.StatusCode)
 	}
+	c.healthy.Store(true)
+	c.lastCheck.Store(time.Now().Unix())
 	return nil
 }
 
@@ -383,8 +525,11 @@ func (c *MLClient) DetectFaces(imagePath string) (*DetectFacesResponse, error) {
 		return nil, fmt.Errorf("创建人脸检测请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewBuffer(jsonData)), nil
+	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, fmt.Errorf("调用人脸检测失败: %w", err)
 	}
@@ -419,8 +564,11 @@ func (c *MLClient) Chat(message string) (string, error) {
 		return "", fmt.Errorf("创建 chat 请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewBuffer(jsonData)), nil
+	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return "", fmt.Errorf("调用 ML chat 失败: %w", err)
 	}

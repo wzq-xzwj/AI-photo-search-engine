@@ -11,7 +11,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.42
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
 	github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
-	go.uber.org/zap v1.27.0
+	go.uber.org/zap v1.28.0
 )
 
 require (
